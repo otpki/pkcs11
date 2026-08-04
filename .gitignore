@@ -1,0 +1,6 @@
+# IDE and OS metadata.
+.idea/
+.DS_Store
+
+# Local conformance output.
+reports/

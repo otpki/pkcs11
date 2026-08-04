@@ -1,0 +1,90 @@
+package pkcs11
+
+import (
+	"context"
+	"errors"
+	"sync"
+)
+
+var errSessionLimiterClosed = errors.New("pkcs11: session limiter is closed")
+
+// sessionLimiter bounds the combined number of native handles owned by all
+// pools for one Client. It complements each pool's own concurrency bound and
+// prevents the read-only and read/write pools from each consuming the full HSM
+// session allowance independently.
+//
+// Closing the limiter wakes blocked acquisitions. Existing holders may still
+// release their permits during pool drain, so close never closes sem itself.
+type sessionLimiter struct {
+	sem       chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func newSessionLimiter(max int) *sessionLimiter {
+	if max < 1 {
+		max = 1
+	}
+	return &sessionLimiter{sem: make(chan struct{}, max), done: make(chan struct{})}
+}
+
+func (l *sessionLimiter) acquire(ctx context.Context) error {
+	if l == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-l.done:
+		return errSessionLimiterClosed
+	default:
+	}
+	select {
+	case <-l.done:
+		return errSessionLimiterClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	case l.sem <- struct{}{}:
+		// close may race with the send. Return the permit before reporting closure
+		// so the limiter's accounting remains exact during a concurrent drain.
+		select {
+		case <-l.done:
+			<-l.sem
+			return errSessionLimiterClosed
+		default:
+			return nil
+		}
+	}
+}
+
+func (l *sessionLimiter) release() {
+	if l == nil {
+		return
+	}
+	select {
+	case <-l.sem:
+	default:
+		panic("pkcs11: session limiter release without acquisition")
+	}
+}
+
+func (l *sessionLimiter) close() {
+	if l != nil {
+		l.closeOnce.Do(func() { close(l.done) })
+	}
+}
+
+func (l *sessionLimiter) used() int {
+	if l == nil {
+		return 0
+	}
+	return len(l.sem)
+}
+
+func (l *sessionLimiter) maximum() int {
+	if l == nil {
+		return 0
+	}
+	return cap(l.sem)
+}
