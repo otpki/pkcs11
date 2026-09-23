@@ -474,6 +474,7 @@ func (c *Client) GenerateKeyPair(ctx context.Context, options KeyPairOptions) (K
 			route.ParameterSet = options.ParameterSet
 			parameterAttribute := []*raw.Attribute{raw.NewAttribute(raw.CKA_PARAMETER_SET, options.ParameterSet)}
 			route.PublicTemplate = mergeAttributes(route.PublicTemplate, parameterAttribute)
+			route.PrivateTemplate = mergeAttributes(route.PrivateTemplate, parameterAttribute)
 		}
 	}
 	if options.Algorithm == AlgorithmHSS || options.Algorithm == AlgorithmLMS {

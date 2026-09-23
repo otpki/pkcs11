@@ -99,33 +99,50 @@ docker builder prune -af
 Restart Docker Desktop and retry if the daemon still references the missing
 blob.
 
-## Licensed Utimaco simulator
+## Licensed Utimaco simulators
+
+Two licensed fixtures cover Utimaco's CryptoServer simulator lineup; neither is
+part of `-provider all` because both need licensed release archives.
 
 ```sh
+# Classical SecurityServer (GP) simulator
 go run . \
-  -root ../.. \
-  -provider utimaco-quantumprotect-simulator \
-  -asset runtime=/secure/u.trust-GP-HSM-Simulator_v6.4.0.0.zip \
-  -asset quantumprotect=/secure/QuantumProtect-1.5.0.0-Evaluation.zip
+  -provider utimaco-gp \
+  -asset gp-archive=/secure/u.trust-GP-HSM-Simulator_v6.6.0.0.zip
+
+# QuantumProtect evaluation simulator (ML-DSA, ML-KEM, LMS/HSS)
+go run . \
+  -provider utimaco-qp \
+  -asset gp-archive=/secure/u.trust-GP-HSM-Simulator_v6.6.0.0.zip \
+  -asset qp-archive=/secure/QuantumProtect-1.5.0.0-Evaluation.zip
 ```
 
-The fixture also accepts `UTIMACO_SIMULATOR_ARCHIVE` and
-`UTIMACO_QUANTUMPROTECT_ARCHIVE`.
+`utimaco-qp` needs both archives: the GP release provides the shared PKCS #11
+client library and administration tools, while the QuantumProtect evaluation
+release provides the simulator with the HBS, ML, and PQMI firmware modules. The
+assets can also be supplied through `PKCS11_UTIMACO_GP_ARCHIVE` and
+`PKCS11_UTIMACO_QP_ARCHIVE`.
 
-The supplied simulator is x86-only. Its fixture declares `linux/amd64`, and the
-launcher applies that OCI platform to both the Docker build and the started
-container. Setting `--platform` only in a Dockerfile is not sufficient with
-every Docker builder, so the platform build uses the standard Docker Buildx
-plugin. Docker Desktop on Apple Silicon can build the image, but cannot run the
-simulator's 32-bit host timer correctly; execute this provider on native Linux
-amd64. The entrypoint detects the emulator failure and exits immediately.
+The supplied simulators are 32-bit x86 binaries. Their fixtures declare
+`linux/amd64`, and the launcher applies that OCI platform to both the Docker
+build and the started container. Setting `--platform` only in a Dockerfile is
+not sufficient with every Docker builder, so the platform build uses the
+standard Docker Buildx plugin.
 
-`vendors/utimaco/conformance.SimulatorFixture` creates a temporary build
-context, copies the repository without VCS/report material, extracts only the
-required licensed Linux files, validates the expected archive layout, and
-removes the context after the run. The original archives are never copied into
-reports. The built local image and Docker cache still contain licensed material
-and remain subject to the applicable agreement.
+On Apple Silicon the simulator runs under qemu-user emulation. Stock qemu-i386
+cannot deliver guest realtime signals at or above 61, which parks the
+simulator's scheduler before its accept loop starts. The image builds a small
+32-bit `qemu_sigfix.so` preload that remaps those signals to a deliverable
+number; the entrypoint scopes `LD_PRELOAD` to `bl_sim5` only so 64-bit
+processes are unaffected. No special host setup is required beyond a working
+Docker Desktop qemu/binfmt installation.
+
+`vendors/utimaco/conformance.Fixtures` extracts only the required licensed
+Linux files into an ephemeral `licensed/utimaco` staging directory inside the
+build context, validates the expected archive layout, and removes the staging
+directory after the run. The original archives are never copied into reports.
+The built local image and Docker cache still contain licensed material and
+remain subject to the applicable agreement.
 
 ## Adding a provider
 

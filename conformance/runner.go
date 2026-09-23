@@ -171,6 +171,7 @@ func IsUnsupported(err error) bool {
 	message := strings.ToLower(err.Error())
 	for _, fragment := range []string{
 		"not supported", "unsupported algorithm", "no route", "route is unavailable", "not advertised",
+		"does not expose",
 		"has neither standard mechanism", "does not define key-type alias", "does not define parameter-set alias",
 		"requires vendor mechanism alias", "has no usable alias", "has no generation path", "requires a vendor",
 		"is not a key-pair algorithm", "is not a secret-key algorithm",

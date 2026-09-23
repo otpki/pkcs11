@@ -955,6 +955,7 @@ func (r *Route) buildTemplates(spec algorithmSpec) {
 		}
 		if r.ParameterSet != 0 && !r.OmitParameterSetAttribute {
 			r.PublicTemplate = append(r.PublicTemplate, raw.NewAttribute(raw.CKA_PARAMETER_SET, r.ParameterSet))
+			r.PrivateTemplate = append(r.PrivateTemplate, raw.NewAttribute(raw.CKA_PARAMETER_SET, r.ParameterSet))
 		}
 		if r.Intent.Algorithm == AlgorithmRSA {
 			r.PublicTemplate = append(r.PublicTemplate, raw.NewAttribute(raw.CKA_MODULUS_BITS, uint(3072)), raw.NewAttribute(raw.CKA_PUBLIC_EXPONENT, big.NewInt(65537)))

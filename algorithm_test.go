@@ -142,7 +142,7 @@ func TestResolveEdDSAParameters(t *testing.T) {
 	}
 }
 
-func TestResolvePQCGenerationParameterSetIsPublicOnly(t *testing.T) {
+func TestResolvePQCGenerationParameterSetOnBothTemplates(t *testing.T) {
 	device := testDevice(adapterDefinition{name: "generic"}, map[raw.MechanismType]raw.MechanismInfo{
 		raw.MechanismType(raw.CKM_ML_DSA_KEY_PAIR_GEN): {Flags: raw.CKF_GENERATE_KEY_PAIR},
 	})
@@ -150,11 +150,17 @@ func TestResolvePQCGenerationParameterSetIsPublicOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := invariantValue(route.PublicTemplate, raw.CKA_PARAMETER_SET); !ok {
-		t.Fatal("public generation template lacks CKA_PARAMETER_SET")
-	}
-	if _, ok := invariantValue(route.PrivateTemplate, raw.CKA_PARAMETER_SET); ok {
-		t.Fatal("private generation template contains read-only CKA_PARAMETER_SET")
+	// PKCS #11 3.2 lists CKA_PARAMETER_SET in both generation templates and
+	// every observed v3.2 provider (Securosys Primus, Entrust nShield) requires
+	// it on the private template too.
+	for name, template := range map[string][]*raw.Attribute{"public": route.PublicTemplate, "private": route.PrivateTemplate} {
+		value, ok := invariantValue(template, raw.CKA_PARAMETER_SET)
+		if !ok {
+			t.Fatalf("%s generation template lacks CKA_PARAMETER_SET", name)
+		}
+		if actual, valid := raw.ULong(value); !valid || actual != raw.CKP_ML_DSA_65 {
+			t.Fatalf("%s template CKA_PARAMETER_SET = %x, want %x", name, value, raw.CKP_ML_DSA_65)
+		}
 	}
 }
 

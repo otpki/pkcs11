@@ -4,3 +4,6 @@
 
 # Local conformance output.
 reports/
+
+# Licensed simulator material staged transiently by conformance fixtures.
+licensed/

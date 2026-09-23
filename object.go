@@ -191,7 +191,14 @@ func (c *Client) Find(ctx context.Context, query ObjectQuery) ([]ObjectRef, erro
 			requested = mergeAttributes(requested)
 			attributes, attributeErr := session.GetAttributeValue(handle, requested)
 			if attributeErr != nil && len(attributes) == 0 {
-				return attributeErr
+				// Utimaco's CXI layer answers a batched read with a device
+				// error when any property tag is unknown instead of reporting
+				// per-attribute failures, so retry attribute-by-attribute
+				// before giving up on the object.
+				attributes, attributeErr = readObjectAttributes(session, handle, requested)
+				if attributeErr != nil && len(attributes) == 0 {
+					return attributeErr
+				}
 			}
 			ref := ObjectRef{Handle: handle}
 			for _, attribute := range attributes {
@@ -214,6 +221,26 @@ func (c *Client) Find(ctx context.Context, query ObjectQuery) ([]ObjectRef, erro
 		return nil
 	})
 	return result, err
+}
+
+// readObjectAttributes retries a failed batched attribute query one attribute
+// at a time. Providers that hard-fail a multi-attribute read on any unknown
+// property tag still answer each attribute separately under the ordinary
+// per-attribute error model.
+func readObjectAttributes(session *sessionLease, handle raw.ObjectHandle, requested []*raw.Attribute) ([]*raw.Attribute, error) {
+	var collected []*raw.Attribute
+	var firstErr error
+	for _, attribute := range requested {
+		values, err := session.GetAttributeValue(handle, []*raw.Attribute{attribute})
+		collected = append(collected, values...)
+		if len(values) == 0 && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if len(collected) == 0 {
+		return nil, firstErr
+	}
+	return collected, nil
 }
 
 // inferAlgorithm converts token metadata back into the public algorithm model.

@@ -216,6 +216,45 @@ func TestNormalizeTemplateMLAlgorithms(t *testing.T) {
 	}
 }
 
+func TestNormalizeTemplateDropsUnsupportedPolicyAttributes(t *testing.T) {
+	module := &Module{}
+	input := []*raw.Attribute{
+		raw.NewAttribute(raw.CKA_CLASS, raw.CKO_PRIVATE_KEY),
+		raw.NewAttribute(raw.CKA_KEY_TYPE, raw.CKK_RSA),
+		raw.NewAttribute(raw.CKA_TOKEN, true),
+		raw.NewAttribute(raw.CKA_MODIFIABLE, true),
+		raw.NewAttribute(raw.CKA_COPYABLE, true),
+		raw.NewAttribute(raw.CKA_DESTROYABLE, true),
+		raw.NewAttribute(raw.CKA_ALWAYS_AUTHENTICATE, false),
+		raw.NewAttribute(raw.CKA_PUBLIC_KEY_INFO, []byte{0x30, 0x00}),
+	}
+	adapted, err := module.NormalizeTemplate(pkcs11.VendorTemplateContext{}, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, typ := range []uint{raw.CKA_COPYABLE, raw.CKA_DESTROYABLE, raw.CKA_ALWAYS_AUTHENTICATE, raw.CKA_PUBLIC_KEY_INFO} {
+		for _, attribute := range adapted {
+			if attribute != nil && attribute.Type == typ {
+				t.Fatalf("attribute %#x was not removed", typ)
+			}
+		}
+	}
+	for _, typ := range []uint{raw.CKA_CLASS, raw.CKA_KEY_TYPE, raw.CKA_TOKEN, raw.CKA_MODIFIABLE} {
+		found := false
+		for _, attribute := range adapted {
+			if attribute != nil && attribute.Type == typ {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("attribute %#x was unexpectedly removed", typ)
+		}
+	}
+	if len(input) != 8 {
+		t.Fatal("caller template was mutated")
+	}
+}
+
 func TestInferAlgorithmAndCapabilities(t *testing.T) {
 	module := &Module{}
 	algorithm, ok := module.InferAlgorithm(pkcs11.VendorObjectMetadata{
@@ -238,5 +277,36 @@ func TestInferAlgorithmAndCapabilities(t *testing.T) {
 	capability := capabilities.Algorithms[pkcs11.AlgorithmMLDSA65]
 	if !capability.KeyGeneration || !capability.Sign || !capability.Verify || !capabilities.PQC || !capabilities.MLDSA {
 		t.Fatalf("capabilities = %#v", capabilities)
+	}
+}
+
+func TestQuantumProtectSynthesizesVDMMechanisms(t *testing.T) {
+	module := &Module{quantumProtect: true}
+	// A QuantumProtect token reports only classical mechanisms through
+	// C_GetMechanismList; the VDM set must be synthesised from the declared flag.
+	capabilities := pkcs11.Capabilities{
+		Mechanisms: make(map[raw.MechanismType]raw.MechanismInfo),
+		Algorithms: make(map[pkcs11.Algorithm]pkcs11.AlgorithmCapability),
+	}
+	module.AugmentCapabilities(pkcs11.Fingerprint{}, &capabilities)
+	if !capabilities.HasMechanism(MechanismMLDSAKeyPairGen) || !capabilities.HasMechanism(MechanismMLKEMEncapsulate) || !capabilities.HasMechanism(MechanismHSSKeyGen) {
+		t.Fatalf("QuantumProtect mechanisms missing: %#v", capabilities.Mechanisms)
+	}
+	if !capabilities.MLDSA || !capabilities.MLKEM || !capabilities.PQC {
+		t.Fatalf("PQC capability flags not raised: %#v", capabilities)
+	}
+	if !capabilities.Algorithms[pkcs11.AlgorithmMLKEM768].Encapsulate {
+		t.Fatalf("ml-kem-768 encapsulate missing: %#v", capabilities.Algorithms)
+	}
+
+	// Without the declaration a plain CryptoServer token keeps only its
+	// enumerated mechanisms.
+	plain := pkcs11.Capabilities{
+		Mechanisms: make(map[raw.MechanismType]raw.MechanismInfo),
+		Algorithms: make(map[pkcs11.Algorithm]pkcs11.AlgorithmCapability),
+	}
+	(&Module{}).AugmentCapabilities(pkcs11.Fingerprint{}, &plain)
+	if plain.HasMechanism(MechanismMLDSAKeyPairGen) || plain.MLDSA {
+		t.Fatalf("undeclared token gained QuantumProtect capabilities: %#v", plain.Mechanisms)
 	}
 }

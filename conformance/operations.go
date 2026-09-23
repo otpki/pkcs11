@@ -1267,6 +1267,8 @@ func (r *Runner) keyPairOptions(testCase Case) pkcs11.KeyPairOptions {
 		RSABits:      testCase.RSABits,
 		ParameterSet: uint(testCase.ParameterSet),
 	}
+	options.PublicAttributes = testCase.PublicAttributes
+	options.PrivateAttributes = testCase.PrivateAttributes
 	if testCase.HSS != nil {
 		hss := &pkcs11.HSSParameters{Levels: testCase.HSS.Levels}
 		for _, value := range testCase.HSS.LMSTypes {
@@ -1308,7 +1310,7 @@ func (r *Runner) identity(name string) string {
 		prefix = prefix[:8]
 	}
 	sequence := conformanceIdentityCounter.Add(1)
-	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%d", prefix, name, time.Now().UnixNano(), sequence)))
+	digest := sha256.Sum256(fmt.Appendf(nil, "%s\x00%s\x00%d\x00%d", prefix, name, time.Now().UnixNano(), sequence))
 	// Keep the base identity to 21 bytes so suffixes such as "-unwrapped"
 	// remain within the conservative 31-byte label limit of older HSMs.
 	return fmt.Sprintf("%s-%x", prefix, digest[:6])

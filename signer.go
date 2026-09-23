@@ -8,6 +8,8 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	_ "crypto/sha1"
+	_ "crypto/sha512"
 	"encoding/asn1"
 	"fmt"
 	"io"
@@ -151,9 +153,89 @@ func (s *Signer) Sign(_ io.Reader, input []byte, opts crypto.SignerOpts) ([]byte
 // SignContext performs the same operation as Sign while honoring ctx for
 // session acquisition, retries, login, and recovery.
 func (s *Signer) SignContext(ctx context.Context, input []byte, opts crypto.SignerOpts) ([]byte, error) {
+	return s.signInput(ctx, input, opts, false)
+}
+
+// SignMessage implements crypto.MessageSigner. Unlike Sign it always receives
+// the complete message: hash-based algorithms are routed through the combined
+// hash-and-sign mechanisms so the token performs the hashing, and the result
+// is identical to Sign on the corresponding digest. When the token does not
+// expose a combined mechanism, the message is hashed in software and signed
+// through the raw or externally prehashed mechanism instead. Ed25519 honors
+// *ed25519.Options Context and Hash for the ctx/ph variants.
+func (s *Signer) SignMessage(_ io.Reader, message []byte, opts crypto.SignerOpts) ([]byte, error) {
+	return s.SignMessageContext(context.Background(), message, opts)
+}
+
+// SignMessageContext performs the same operation as SignMessage while honoring
+// ctx for session acquisition, retries, login, and recovery.
+func (s *Signer) SignMessageContext(ctx context.Context, message []byte, opts crypto.SignerOpts) ([]byte, error) {
+	return s.signInput(ctx, message, opts, true)
+}
+
+// signInput is the shared signing path. messageLevel selects the input
+// convention: false means the crypto.Signer digest contract, true means the
+// crypto.MessageSigner complete-message contract.
+func (s *Signer) signInput(ctx context.Context, input []byte, opts crypto.SignerOpts, messageLevel bool) ([]byte, error) {
 	if s == nil || s.client == nil {
 		return nil, fmt.Errorf("pkcs11: signer is nil or closed")
 	}
+	intent, err := s.signIntent(input, opts, messageLevel)
+	if err != nil {
+		return nil, err
+	}
+	signature, err := s.client.sign(ctx, s.private, intent, input)
+	if err == nil || !messageLevel {
+		return signature, err
+	}
+	fallback, hash, ok := s.messageDigestFallback(intent)
+	if !ok {
+		return nil, err
+	}
+	if _, resolveErr := s.client.Resolve(fallback); resolveErr != nil {
+		return nil, err
+	}
+	hasher := hash.New()
+	_, _ = hasher.Write(input)
+	return s.client.sign(ctx, s.private, fallback, hasher.Sum(nil))
+}
+
+// messageDigestFallback converts a message-level intent into the equivalent
+// digest-level intent for tokens that cannot hash internally: hashing the
+// message in software and signing through the raw or externally prehashed
+// mechanism produces an identical signature. It reports false when the
+// algorithm has no digest form or the caller dictated the input shape or the
+// mechanism explicitly.
+func (s *Signer) messageDigestFallback(intent Intent) (Intent, crypto.Hash, bool) {
+	if intent.Prehashed || intent.ExternalMu || intent.MechanismOverride != nil || intent.MechanismParameter != nil {
+		return Intent{}, 0, false
+	}
+	switch s.algorithm {
+	case AlgorithmRSA, AlgorithmECDSAP256, AlgorithmECDSAP384, AlgorithmECDSAP521,
+		AlgorithmMLDSA44, AlgorithmMLDSA65, AlgorithmMLDSA87,
+		AlgorithmSLHDSASHA2128S, AlgorithmSLHDSASHAKE128S, AlgorithmSLHDSASHA2128F, AlgorithmSLHDSASHAKE128F,
+		AlgorithmSLHDSASHA2192S, AlgorithmSLHDSASHAKE192S, AlgorithmSLHDSASHA2192F, AlgorithmSLHDSASHAKE192F,
+		AlgorithmSLHDSASHA2256S, AlgorithmSLHDSASHAKE256S, AlgorithmSLHDSASHA2256F, AlgorithmSLHDSASHAKE256F:
+	default:
+		return Intent{}, 0, false
+	}
+	hash := intent.Hash
+	if hash == 0 {
+		hash = defaultSignatureHash(s.algorithm)
+	}
+	if hash == 0 || !hash.Available() {
+		return Intent{}, 0, false
+	}
+	intent.Prehashed = true
+	intent.Hash = hash
+	return intent, hash, true
+}
+
+// signIntent resolves opts and the configured signer defaults into a route
+// intent. messageLevel mirrors signInput: when true, input is always the
+// complete message, so hash-based algorithms are pointed at the combined
+// hash-and-sign mechanisms instead of digest input.
+func (s *Signer) signIntent(input []byte, opts crypto.SignerOpts, messageLevel bool) (Intent, error) {
 	hash := crypto.Hash(0)
 	if opts != nil {
 		hash = opts.HashFunc()
@@ -161,13 +243,16 @@ func (s *Signer) SignContext(ctx context.Context, input []byte, opts crypto.Sign
 	if hash == 0 {
 		hash = s.defaultHash
 	}
+	if messageLevel && hash == 0 {
+		hash = defaultSignatureHash(s.algorithm)
+	}
 	intent := Intent{Operation: OperationSign, Algorithm: s.algorithm, Hash: hash, Context: s.context, Hedge: s.hedge}
 	if custom, ok := signatureOptions(opts); ok {
 		// SignatureOptions is the explicit driver contract and therefore replaces
 		// Signer defaults field by field rather than being interpreted as a generic
 		// crypto.SignerOpts hash-only value.
 		if custom.Algorithm != "" && custom.Algorithm != s.algorithm {
-			return nil, fmt.Errorf("pkcs11: signer algorithm %q does not match requested %q", s.algorithm, custom.Algorithm)
+			return Intent{}, fmt.Errorf("pkcs11: signer algorithm %q does not match requested %q", s.algorithm, custom.Algorithm)
 		}
 		intent.Hash = custom.Hash
 		intent.Prehashed = custom.Prehashed
@@ -178,11 +263,23 @@ func (s *Signer) SignContext(ctx context.Context, input []byte, opts crypto.Sign
 		intent.ExternalMu = custom.ExternalMu
 		intent.MechanismOverride = custom.MechanismOverride
 		intent.MechanismParameter = custom.MechanismParameter
+		if messageLevel && intent.Prehashed {
+			switch s.algorithm {
+			case AlgorithmEd25519, AlgorithmEd448:
+				// EdDSA has no digest-input form: its Prehash flag selects the
+				// ph variant, and the token still receives the whole message.
+			default:
+				// Elsewhere Prehashed describes the input shape. SignMessage
+				// input is always the complete message, so a requested prehash
+				// becomes the token-internal hash variant selected by Hash.
+				intent.Prehashed = false
+			}
+		}
 	}
 	switch s.algorithm {
 	case AlgorithmRSA:
 		if _, custom := signatureOptions(opts); !custom {
-			intent.Prehashed = true
+			intent.Prehashed = !messageLevel
 			intent.RSAPadding = s.padding
 		}
 		if pss, ok := opts.(*rsa.PSSOptions); ok {
@@ -193,7 +290,7 @@ func (s *Signer) SignContext(ctx context.Context, input []byte, opts crypto.Sign
 			}
 			saltLength, err := pssSaltLength(s.publicKey, intent.Hash, pss.SaltLength)
 			if err != nil {
-				return nil, err
+				return Intent{}, err
 			}
 			intent.PSSSaltLength = saltLength
 		} else if _, custom := signatureOptions(opts); !custom {
@@ -205,13 +302,13 @@ func (s *Signer) SignContext(ctx context.Context, input []byte, opts crypto.Sign
 		if intent.RSAPadding == RSAPaddingPSS && intent.PSSSaltLength == 0 {
 			saltLength, err := pssSaltLength(s.publicKey, intent.Hash, rsa.PSSSaltLengthAuto)
 			if err != nil {
-				return nil, err
+				return Intent{}, err
 			}
 			intent.PSSSaltLength = saltLength
 		}
 	case AlgorithmECDSAP256, AlgorithmECDSAP384, AlgorithmECDSAP521:
 		if _, custom := signatureOptions(opts); !custom {
-			intent.Prehashed = true
+			intent.Prehashed = !messageLevel
 		}
 	case AlgorithmEd25519:
 		if _, custom := signatureOptions(opts); !custom {
@@ -232,10 +329,10 @@ func (s *Signer) SignContext(ctx context.Context, input []byte, opts crypto.Sign
 		AlgorithmSLHDSASHA2256S, AlgorithmSLHDSASHAKE256S, AlgorithmSLHDSASHA2256F, AlgorithmSLHDSASHAKE256F,
 		AlgorithmHSS, AlgorithmLMS, AlgorithmXMSS, AlgorithmXMSSMT:
 		if intent.ExternalMu && len(input) != 64 {
-			return nil, fmt.Errorf("pkcs11: ML-DSA external mu must be exactly 64 bytes, got %d", len(input))
+			return Intent{}, fmt.Errorf("pkcs11: ML-DSA external mu must be exactly 64 bytes, got %d", len(input))
 		}
 	}
-	return s.client.sign(ctx, s.private, intent, input)
+	return intent, nil
 }
 
 // signatureOptions accepts both value and pointer forms so callers can use a
@@ -739,4 +836,5 @@ func (c *Client) GenerateSigner(ctx context.Context, options KeyPairOptions, sig
 }
 
 var _ crypto.Signer = (*Signer)(nil)
+var _ crypto.MessageSigner = (*Signer)(nil)
 var _ crypto.Decrypter = (*Decrypter)(nil)

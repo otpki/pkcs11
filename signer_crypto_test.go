@@ -3,6 +3,7 @@ package pkcs11
 import (
 	"bytes"
 	"crypto"
+	"crypto/ed25519"
 	"crypto/rsa"
 	"encoding/asn1"
 	"math/big"
@@ -126,6 +127,214 @@ func TestSignatureIntentDefaults(t *testing.T) {
 	}
 	if pqcIntent.Hash != 0 || pqcIntent.Prehashed || pqcIntent.Hedge != HedgeRequired || string(pqcIntent.Context) != "ctx" {
 		t.Fatalf("PQC defaults = %#v", pqcIntent)
+	}
+}
+
+func TestSignMessageIntentRoutesCombinedMechanisms(t *testing.T) {
+	public := &rsa.PublicKey{N: new(big.Int).Lsh(big.NewInt(1), 2047), E: 65537}
+	device := testDevice(adapterDefinition{name: "generic"}, map[raw.MechanismType]raw.MechanismInfo{
+		raw.MechanismType(raw.CKM_RSA_PKCS):            {Flags: raw.CKF_SIGN},
+		raw.MechanismType(raw.CKM_SHA256_RSA_PKCS):     {Flags: raw.CKF_SIGN},
+		raw.MechanismType(raw.CKM_RSA_PKCS_PSS):        {Flags: raw.CKF_SIGN},
+		raw.MechanismType(raw.CKM_SHA256_RSA_PKCS_PSS): {Flags: raw.CKF_SIGN},
+		raw.MechanismType(raw.CKM_ECDSA):               {Flags: raw.CKF_SIGN},
+		raw.MechanismType(raw.CKM_ECDSA_SHA384):        {Flags: raw.CKF_SIGN},
+		raw.MechanismType(raw.CKM_EDDSA):               {Flags: raw.CKF_SIGN},
+		raw.MechanismType(raw.CKM_ML_DSA):              {Flags: raw.CKF_SIGN},
+		raw.MechanismType(raw.CKM_HASH_ML_DSA):         {Flags: raw.CKF_SIGN},
+		raw.MechanismType(raw.CKM_HASH_ML_DSA_SHA512):  {Flags: raw.CKF_SIGN},
+		raw.MechanismType(raw.CKM_HSS):                 {Flags: raw.CKF_SIGN},
+	})
+	message := []byte("message-level input")
+	for _, test := range []struct {
+		name      string
+		signer    *Signer
+		opts      crypto.SignerOpts
+		mechanism uint
+		prehashed bool
+	}{
+		{
+			"rsa pkcs1v15 hashes the message on token",
+			&Signer{algorithm: AlgorithmRSA, publicKey: public},
+			crypto.SHA256, raw.CKM_SHA256_RSA_PKCS, false,
+		},
+		{
+			"rsa pss keeps pss options and hashes on token",
+			&Signer{algorithm: AlgorithmRSA, publicKey: public},
+			&rsa.PSSOptions{Hash: crypto.SHA256, SaltLength: rsa.PSSSaltLengthEqualsHash},
+			raw.CKM_SHA256_RSA_PKCS_PSS, false,
+		},
+		{
+			"ecdsa zero hash falls back to the curve default",
+			&Signer{algorithm: AlgorithmECDSAP384},
+			crypto.Hash(0), raw.CKM_ECDSA_SHA384, false,
+		},
+		{
+			"mldsa prehashed option becomes the internal hash variant",
+			&Signer{algorithm: AlgorithmMLDSA65},
+			SignatureOptions{Hash: crypto.SHA512, Prehashed: true},
+			raw.CKM_HASH_ML_DSA_SHA512, false,
+		},
+		{
+			"ed25519 prehashed option selects the ph variant",
+			&Signer{algorithm: AlgorithmEd25519},
+			SignatureOptions{Prehashed: true, Context: []byte("ctx")},
+			raw.CKM_EDDSA, true,
+		},
+		{
+			"ed25519 options carry context through",
+			&Signer{algorithm: AlgorithmEd25519},
+			&ed25519.Options{Hash: crypto.SHA512, Context: "ctx"},
+			raw.CKM_EDDSA, true,
+		},
+		{
+			"lms signs the message directly",
+			&Signer{algorithm: AlgorithmLMS},
+			crypto.Hash(0), raw.CKM_HSS, false,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			intent, err := test.signer.signIntent(message, test.opts, true)
+			if err != nil {
+				t.Fatalf("signIntent: %v", err)
+			}
+			if intent.Prehashed != test.prehashed {
+				t.Fatalf("intent.Prehashed = %v, want %v", intent.Prehashed, test.prehashed)
+			}
+			route, err := ResolveRoute(device, intent)
+			if err != nil {
+				t.Fatalf("ResolveRoute: %v", err)
+			}
+			if route.Mechanism == nil || route.Mechanism.Mechanism != test.mechanism {
+				t.Fatalf("mechanism = %#v, want %#x", route.Mechanism, test.mechanism)
+			}
+		})
+	}
+
+	// Stateful HBS algorithms sign messages directly; a nonzero hash must
+	// produce a routing error rather than silently hashing the message.
+	lms := &Signer{algorithm: AlgorithmLMS}
+	intent, err := lms.signIntent(message, crypto.SHA256, true)
+	if err != nil {
+		t.Fatalf("signIntent: %v", err)
+	}
+	if _, err := ResolveRoute(device, intent); err == nil {
+		t.Fatal("expected LMS hash routing rejection")
+	}
+}
+
+func TestMessageDigestFallback(t *testing.T) {
+	public := &rsa.PublicKey{N: new(big.Int).Lsh(big.NewInt(1), 2047), E: 65537}
+	// This token exposes only the raw and externally prehashed mechanisms;
+	// the combined hash-and-sign variants are absent.
+	rawOnly := testDevice(adapterDefinition{name: "generic"}, map[raw.MechanismType]raw.MechanismInfo{
+		raw.MechanismType(raw.CKM_RSA_PKCS):     {Flags: raw.CKF_SIGN},
+		raw.MechanismType(raw.CKM_RSA_PKCS_PSS): {Flags: raw.CKF_SIGN},
+		raw.MechanismType(raw.CKM_ECDSA):        {Flags: raw.CKF_SIGN},
+		raw.MechanismType(raw.CKM_HASH_ML_DSA):  {Flags: raw.CKF_SIGN},
+		raw.MechanismType(raw.CKM_EDDSA):        {Flags: raw.CKF_SIGN},
+	})
+	message := []byte("message-level input")
+	for _, test := range []struct {
+		name      string
+		signer    *Signer
+		opts      crypto.SignerOpts
+		mechanism uint
+		hash      crypto.Hash
+		ok        bool
+	}{
+		{
+			"rsa falls back to the raw mechanism",
+			&Signer{algorithm: AlgorithmRSA, publicKey: public},
+			crypto.SHA256, raw.CKM_RSA_PKCS, crypto.SHA256, true,
+		},
+		{
+			"rsa pss falls back to raw pss",
+			&Signer{algorithm: AlgorithmRSA, publicKey: public},
+			&rsa.PSSOptions{Hash: crypto.SHA256, SaltLength: rsa.PSSSaltLengthEqualsHash},
+			raw.CKM_RSA_PKCS_PSS, crypto.SHA256, true,
+		},
+		{
+			"ecdsa falls back to the raw mechanism",
+			&Signer{algorithm: AlgorithmECDSAP384},
+			crypto.Hash(0), raw.CKM_ECDSA, crypto.SHA384, true,
+		},
+		{
+			"mldsa falls back to the externally prehashed mechanism",
+			&Signer{algorithm: AlgorithmMLDSA65},
+			SignatureOptions{Hash: crypto.SHA512, Prehashed: true},
+			raw.CKM_HASH_ML_DSA, crypto.SHA512, true,
+		},
+		{
+			"ed25519 has no external digest form",
+			&Signer{algorithm: AlgorithmEd25519},
+			crypto.Hash(0), 0, 0, false,
+		},
+		{
+			"lms has no digest form",
+			&Signer{algorithm: AlgorithmLMS},
+			crypto.Hash(0), 0, 0, false,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			intent, err := test.signer.signIntent(message, test.opts, true)
+			if err != nil {
+				t.Fatalf("signIntent: %v", err)
+			}
+			fallback, hash, ok := test.signer.messageDigestFallback(intent)
+			if ok != test.ok {
+				t.Fatalf("fallback ok = %v, want %v", ok, test.ok)
+			}
+			if !ok {
+				return
+			}
+			if !fallback.Prehashed || hash != test.hash {
+				t.Fatalf("fallback intent = %#v hash %v", fallback, hash)
+			}
+			route, err := ResolveRoute(rawOnly, fallback)
+			if err != nil {
+				t.Fatalf("ResolveRoute fallback: %v", err)
+			}
+			if route.Mechanism == nil || route.Mechanism.Mechanism != test.mechanism {
+				t.Fatalf("fallback mechanism = %#v, want %#x", route.Mechanism, test.mechanism)
+			}
+		})
+	}
+
+	// Callers that dictated the input shape or mechanism get no fallback.
+	rsaSigner := &Signer{algorithm: AlgorithmRSA, publicKey: public}
+	for _, opts := range []crypto.SignerOpts{
+		SignatureOptions{Prehashed: true, Hash: crypto.SHA256},
+		SignatureOptions{MechanismOverride: new(uint)},
+	} {
+		intent, err := rsaSigner.signIntent(message, opts, false)
+		if err != nil {
+			t.Fatalf("signIntent: %v", err)
+		}
+		if _, _, ok := rsaSigner.messageDigestFallback(intent); ok {
+			t.Fatalf("opts %#v must not produce a digest fallback", opts)
+		}
+	}
+}
+
+func TestSignDigestIntentKeepsPrehashedContract(t *testing.T) {
+	public := &rsa.PublicKey{N: new(big.Int).Lsh(big.NewInt(1), 2047), E: 65537}
+	signer := &Signer{algorithm: AlgorithmRSA, publicKey: public}
+	intent, err := signer.signIntent(make([]byte, crypto.SHA256.Size()), crypto.SHA256, false)
+	if err != nil {
+		t.Fatalf("signIntent: %v", err)
+	}
+	if !intent.Prehashed || intent.RSAPadding != RSAPaddingPKCS1v15 {
+		t.Fatalf("digest intent = %#v", intent)
+	}
+
+	mldsa := &Signer{algorithm: AlgorithmMLDSA65}
+	intent, err = mldsa.signIntent(make([]byte, crypto.SHA512.Size()), SignatureOptions{Hash: crypto.SHA512, Prehashed: true}, false)
+	if err != nil {
+		t.Fatalf("signIntent: %v", err)
+	}
+	if !intent.Prehashed {
+		t.Fatalf("digest-level ML-DSA intent must stay prehashed: %#v", intent)
 	}
 }
 

@@ -108,7 +108,11 @@ type Case struct {
 	ExpectRecovery *bool
 	Context        string
 	Verify         *bool
-	Notes          string
+	// PublicAttributes and PrivateAttributes merge raw attributes into the
+	// generated key-pair templates last, overriding policy-derived defaults.
+	PublicAttributes  []*raw.Attribute
+	PrivateAttributes []*raw.Attribute
+	Notes             string
 }
 
 // Profile is a Go-native HSM conformance plan.
