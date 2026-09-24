@@ -1,0 +1,127 @@
+# Example configuration for the pkcs11-proxy broker.
+#
+# Every value may also be supplied through the environment as
+# PKCS11_PROXY_<SECTION>_<KEY>, e.g. PKCS11_PROXY_TARGET_MODULE or
+# PKCS11_PROXY_INSECURE. Flags (--listen, --insecure, --dev-ui) override both.
+#
+# The broker NEVER reads the HSM PIN from this file or the environment. Clients
+# supply it with their login; the first successful login activates the token
+# and the broker retains only an in-memory digest to verify later clients.
+
+# Address clients dial to reach this broker (proxy.Target.Endpoint on the
+# client side). Keep it reachable from every workload that needs the HSM.
+listen: "127.0.0.1:9443"
+
+# Plaintext TCP for local development only. Without tls.cert_file/tls.key_file
+# the broker refuses to start unless insecure is true. Insecure mode still
+# requires the workload auth token and PIN — it only removes transport
+# encryption.
+insecure: true
+
+# TLS protects the client→broker hop. The PIN travels inside C_Login, so an
+# observer on this hop cannot read it even in insecure mode, but TLS also
+# protects every operation and object that crosses the wire.
+# tls:
+#   cert_file: "./server.crt"        # PEM server certificate
+#   key_file: "./server.key"         # PEM private key
+#   client_ca_file: "./clients-ca.crt"   # optional; when set, clients must
+#                                    # present a certificate signed by this
+#                                    # CA (mutual TLS). Their certificate
+#                                    # then doubles as the workload identity.
+
+target:
+  # Public route name of this HSM. Clients pass it as proxy.Target.Route, and
+  # every request names the route it wants — one broker can multiplex several
+  # targets in the library API, though this binary configures exactly one.
+  id: "hsm"
+  # Free-form version string clients must match (proxy.Target.Revision).
+  # Bump it whenever this configuration changes in a way clients should
+  # notice; a mismatch makes the client's describe handshake fail fast instead
+  # of silently running against a changed target.
+  revision: "v1"
+
+  # Local PKCS #11 module the broker drives — the vendor's shared library on
+  # this host (libcs_pkcs11_R3.so, libprimusP11.so, libsofthsm2.so, ...).
+  # The broker loads it once and owns every physical session to the token.
+  module: "/opt/vendor/lib/libpkcs11.so"
+
+  # Which token inside the module to use. An empty label picks the first
+  # token the module reports; set it when a module exposes several slots.
+  token_label: "mytoken"
+  # token_serial: ""               # optional second selector when two tokens
+                                  # share a label
+
+  # Bundled vendor modules to enable, by adapter ID or product name
+  # (for example: utimaco, securosys, nshield, softhsm, thales). Vendor modules
+  # teach the broker provider-specific mechanisms, attribute templates, and
+  # parameter codecs. An empty list enables every module shipped with this
+  # repository — restrict it when the client should see a smaller surface.
+  # IMPORTANT: clients must configure the same vendor set (proxy.Target.
+  # Vendors); the describe handshake requires exact parameter-codec parity.
+  vendors: []
+
+  # The physical identity activated on the token. Only the normal PKCS #11
+  # user is supported; SO/maintenance access is not exposed by this broker.
+  user_type: "user"
+
+sessions:
+  # Hard cap on native HSM sessions the broker opens for this target,
+  # including the reserved control session, idle pool entries, in-flight
+  # calls, and pinned leases. HSMs typically allow few sessions — keep this
+  # under the module's documented maximum.
+  max_physical_total: 8
+  # Subset of the physical pool that may be opened read/write. Read-only
+  # sessions cover most operations; lowering this reduces contention for
+  # modules where RW sessions are scarcer.
+  max_physical_read_write: 4
+  # Physical sessions a single request may hold open across network calls —
+  # used by multipart operations (digest/update/final) and session-object
+  # affinity. Too small and long multipart operations starve under load.
+  max_pinned: 2
+  # Requests allowed to WAIT for a physical session. When the pool is busy and
+  # this queue is also full, new calls fail fast with busy instead of piling
+  # up unbounded goroutines server-side.
+  max_queued: 64
+  # Concurrently retained logical clients (distinct remote Cryptoki
+  # applications). A client that disconnects cleanly releases its slot.
+  max_clients: 256
+  # Virtual sessions one logical client may hold. Virtual sessions are cheap —
+  # they consume no physical HSM session until real work is admitted — so this
+  # mostly bounds bookkeeping memory per client.
+  max_virtual_sessions_per_client: 16
+  # Virtual object-handle mappings retained per client (keys, certificates,
+  # and data objects it has discovered). Bounds per-client memory.
+  max_objects_per_client: 1024
+  # How long an admitted request may wait for physical-session capacity
+  # before failing with busy. Tune up if HSM operations are long-running.
+  queue_timeout: "5s"
+  # Less common budgets — virtual-session/client idle timeouts, dedup ledger
+  # bounds, physical session lifetime rotation — use library defaults and are
+  # not exposed here; see proxy.SessionBudget if you need them.
+
+activation:
+  # After a failed activation attempt (wrong PIN reaching the HSM), the broker
+  # rejects further activation tries for this long. Prevents a burst of racing
+  # clients from turning into a PIN-guessing loop that could lock the token.
+  failure_cooldown: "1s"
+
+verifier:
+  # When a client arrives while another client's activation is still in
+  # flight, it waits and re-checks at this interval. The first client's
+  # C_Login result decides which PIN all others must match.
+  wait_poll_interval: "25ms"
+  # How long a follower waits for an in-flight activation before it may
+  # contend for leadership itself. Also bounds how long a stalled candidate —
+  # one that crashed between authenticate and C_Login — can hold leadership.
+  wait_timeout: "30s"
+
+dev_ui:
+  # Read-only operational dashboard for development: activation state, session
+  # pool meters, client counts, dedup ledger usage. It serves secret-free
+  # counters only — no PINs, no object identities, no mutations. Disabled by
+  # default; --dev-ui enables it for a single run.
+  enabled: false
+  # Must be a loopback address unless allow_remote is set — the dashboard has
+  # no authentication of its own, so exposing it leaks operational metadata.
+  listen: "127.0.0.1:9463"
+  allow_remote: false
