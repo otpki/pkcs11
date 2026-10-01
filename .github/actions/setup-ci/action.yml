@@ -1,0 +1,38 @@
+name: Setup CI
+description: Install Go, caches, aqua-managed dev tools, and just
+
+inputs:
+  go-version:
+    description: Go toolchain version
+    required: false
+    default: 1.27.x
+  tools:
+    description: Install aqua-managed dev tools from .aqua.yaml
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    # cache: true covers GOMODCACHE and GOCACHE keyed on go.sum.
+    - uses: actions/setup-go@v7
+      with:
+        go-version: ${{ inputs.go-version }}
+        check-latest: true
+        cache: true
+
+    - name: Cache aqua-managed tools
+      uses: actions/cache@v6
+      with:
+        path: .tool
+        key: aqua-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.aqua.yaml', 'Justfile') }}
+        restore-keys: |
+          aqua-v1-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Setup Just
+      uses: extractions/setup-just@v4
+
+    - name: Install aqua tools
+      if: inputs.tools == 'true'
+      shell: bash
+      run: just tools

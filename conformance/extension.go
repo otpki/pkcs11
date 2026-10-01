@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -109,7 +110,7 @@ type runConfig struct {
 func WithModuleSource(source pkcs11.ModuleSource) RunOption {
 	return func(config *runConfig) error {
 		if source == nil {
-			return fmt.Errorf("conformance: module source is nil")
+			return errors.New("conformance: module source is nil")
 		}
 		config.module = source
 		return nil

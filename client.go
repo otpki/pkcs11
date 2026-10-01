@@ -198,7 +198,7 @@ func (config Config) validate() error {
 		return err
 	}
 	if config.Compatibility.StrictStandard && config.Compatibility.AdapterFamily != "" {
-		return fmt.Errorf("pkcs11: strict-standard mode cannot force a vendor module")
+		return errors.New("pkcs11: strict-standard mode cannot force a vendor module")
 	}
 	vendors, _, err := validateVendorModules(mergeSourceVendors(config.Module, config.Vendors))
 	if err != nil {
@@ -208,11 +208,11 @@ func (config Config) validate() error {
 		return fmt.Errorf("pkcs11: unknown adapter family %q", config.Compatibility.AdapterFamily)
 	}
 	if config.Sessions.Min < 0 || config.Sessions.Max < 0 || config.Sessions.MaxTotal < 0 || config.Sessions.ReadOnlyMax < 0 || config.Sessions.ReadWriteMax < 0 {
-		return fmt.Errorf("pkcs11: session limits cannot be negative")
+		return errors.New("pkcs11: session limits cannot be negative")
 	}
 	maximum := max(config.Sessions.ReadWriteMax, max(config.Sessions.ReadOnlyMax, config.Sessions.Max))
 	if maximum > 0 && config.Sessions.Min > maximum {
-		return fmt.Errorf("pkcs11: minimum sessions cannot exceed maximum sessions")
+		return errors.New("pkcs11: minimum sessions cannot exceed maximum sessions")
 	}
 	switch config.Login.Mode {
 	case "", LoginNone, LoginLazy, LoginEager, LoginManual:
@@ -289,14 +289,14 @@ func Open(ctx context.Context, config Config) (*Client, error) {
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = client.Close()
+			_ = client.Close(ctx)
 		}
 	}()
 
 	// Discovery fingerprints every token-present slot and dynamically selects
 	// the best matching VendorModule supplied in Config.Vendors. When none
 	// matches, the standards-only generic module remains available as fallback.
-	devices, err := discoverManaged(module, config.Compatibility, client.vendors)
+	devices, err := discoverManaged(ctx, module, config.Compatibility, client.vendors)
 	if err != nil {
 		return nil, err
 	}
@@ -364,7 +364,7 @@ func Open(ctx context.Context, config Config) (*Client, error) {
 // fields; otherwise every non-zero field is combined with logical AND.
 func selectDevice(devices []Device, selector TokenSelector) (Device, error) {
 	if len(devices) == 0 {
-		return Device{}, fmt.Errorf("pkcs11: module has no token-present slots")
+		return Device{}, errors.New("pkcs11: module has no token-present slots")
 	}
 	if selector.SlotIndex != nil {
 		index := *selector.SlotIndex
@@ -391,7 +391,7 @@ func selectDevice(devices []Device, selector TokenSelector) (Device, error) {
 		matches = append(matches, device)
 	}
 	if len(matches) == 0 {
-		return Device{}, fmt.Errorf("pkcs11: no token matches selector")
+		return Device{}, errors.New("pkcs11: no token matches selector")
 	}
 	if len(matches) > 1 {
 		return Device{}, fmt.Errorf("pkcs11: selector matches %d tokens; add slot ID or serial number", len(matches))
@@ -509,6 +509,8 @@ func (c *Client) Activate(ctx context.Context) error {
 // Deactivate drains both pools, performs at most one coordinated physical
 // logout, and closes pooled sessions without unloading the module. It leaves
 // automatic login disabled; call Activate to re-enable login and warm sessions.
+//
+//nolint:contextcheck // Nil callers intentionally fall back to a detached context.
 func (c *Client) Deactivate(ctx context.Context) error {
 	if c == nil || c.closed.Load() {
 		return errors.New("pkcs11: client is closed")
@@ -565,7 +567,7 @@ func (c *Client) Deactivate(ctx context.Context) error {
 		}
 		item = opened
 		cleanup = func() error {
-			err := pool.closeHandle(item)
+			err := pool.closeHandle(ctx, item)
 			pool.module.releaseLease()
 			return err
 		}
@@ -585,8 +587,8 @@ func (c *Client) Deactivate(ctx context.Context) error {
 	}
 	// Any other idle session may carry obsolete token-wide login or operation
 	// state. Close it rather than letting a later caller inherit that state.
-	c.roPool.Invalidate()
-	c.rwPool.Invalidate()
+	c.roPool.Invalidate(ctx)
+	c.rwPool.Invalidate(ctx)
 	c.cache.invalidate()
 	deactivated = true
 	return errors.Join(logoutErr, closeErr)
@@ -616,7 +618,7 @@ type RawModuleOptions struct {
 // models the operation: raw callbacks intentionally expose ABI-level behavior.
 func (c *Client) WithRawModule(ctx context.Context, options RawModuleOptions, fn func(raw.Module) error) error {
 	if fn == nil {
-		return fmt.Errorf("pkcs11: nil raw module callback")
+		return errors.New("pkcs11: nil raw module callback")
 	}
 	operation := strings.TrimSpace(options.Operation)
 	if operation == "" {
@@ -659,7 +661,7 @@ func (c *Client) WithRawSession(
 	fn func(raw.Module, raw.SessionHandle) error,
 ) error {
 	if fn == nil {
-		return fmt.Errorf("pkcs11: nil raw session callback")
+		return errors.New("pkcs11: nil raw session callback")
 	}
 	operation := strings.TrimSpace(options.Operation)
 	if operation == "" {
@@ -688,12 +690,6 @@ func (c *Client) withReadOnlySession(ctx context.Context, fn func(*sessionLease)
 	return c.withSession(ctx, sessionOptions{Operation: "session", Idempotent: true}, fn)
 }
 
-// withReadWriteSession runs a non-replayable mutating operation through the RW
-// pool unless the caller supplies a more specific sessionOptions contract.
-func (c *Client) withReadWriteSession(ctx context.Context, fn func(*sessionLease) error) error {
-	return c.withSession(ctx, sessionOptions{ReadWrite: true, Operation: "session"}, fn)
-}
-
 // withSession is the central acquire, execute, classify, recover, and retry loop.
 // It retries only when the complete operation is explicitly marked idempotent.
 func (c *Client) withSession(ctx context.Context, options sessionOptions, fn func(*sessionLease) error) error {
@@ -701,7 +697,7 @@ func (c *Client) withSession(ctx context.Context, options sessionOptions, fn fun
 		return errors.New("pkcs11: client is closed")
 	}
 	if fn == nil {
-		return fmt.Errorf("pkcs11: nil session callback")
+		return errors.New("pkcs11: nil session callback")
 	}
 	policy := c.retry
 	if options.Retry != nil {
@@ -740,7 +736,7 @@ func (c *Client) withSession(ctx context.Context, options sessionOptions, fn fun
 						// A panic can leave unknown native operation state. Discard the
 						// session before propagating the panic to the application.
 						session.MarkBroken()
-						_ = session.Close()
+						_ = session.Close(ctx)
 						panic(recovered)
 					}
 				}()
@@ -748,7 +744,7 @@ func (c *Client) withSession(ctx context.Context, options sessionOptions, fn fun
 				if action := classifyDeviceError(c.currentDevice(), last, policy.RetryGeneralErrors); action != RecoveryNone {
 					session.MarkBroken()
 				}
-				if closeErr := session.Close(); last == nil && closeErr != nil {
+				if closeErr := session.Close(ctx); last == nil && closeErr != nil {
 					last = closeErr
 				}
 			}()
@@ -779,8 +775,8 @@ func (c *Client) withSession(ctx context.Context, options sessionOptions, fn fun
 func (c *Client) recover(ctx context.Context, action RecoveryAction) error {
 	// Invalidate first so no concurrent acquisition can reuse a session, login
 	// assumption, or object handle from before recovery.
-	c.roPool.Invalidate()
-	c.rwPool.Invalidate()
+	c.roPool.Invalidate(ctx)
+	c.rwPool.Invalidate(ctx)
 	c.cache.invalidate()
 	c.login.reset()
 	if action == RecoveryRelogin {
@@ -795,7 +791,7 @@ func (c *Client) recover(ctx context.Context, action RecoveryAction) error {
 		// Rediscovery may select a changed slot, adapter, capability set, or output
 		// buffer policy after token replacement or network failover.
 		current := c.currentDevice()
-		devices, err := discoverManagedWithPlan(c.module, current.plan, c.compatibility, c.vendors)
+		devices, err := discoverManagedWithPlan(ctx, c.module, current.plan, c.compatibility, c.vendors)
 		if err != nil {
 			return err
 		}
@@ -807,23 +803,23 @@ func (c *Client) recover(ctx context.Context, action RecoveryAction) error {
 		c.device = device
 		c.deviceMu.Unlock()
 		c.module.applyPlan(device.plan)
-		c.roPool.SetDevice(device)
-		c.rwPool.SetDevice(device)
+		c.roPool.SetDevice(ctx, device)
+		c.rwPool.SetDevice(ctx, device)
 	}
 	return ctx.Err()
 }
 
 // invalidateState discards all Client-local state derived from native sessions
 // without reinitializing or unloading the shared module.
-func (c *Client) invalidateState() {
+func (c *Client) invalidateState(ctx context.Context) {
 	if c == nil {
 		return
 	}
 	if c.roPool != nil {
-		c.roPool.Invalidate()
+		c.roPool.Invalidate(ctx)
 	}
 	if c.rwPool != nil {
-		c.rwPool.Invalidate()
+		c.rwPool.Invalidate(ctx)
 	}
 	if c.cache != nil {
 		c.cache.invalidate()
@@ -844,7 +840,7 @@ func (c *Client) Resolve(intent Intent) (Route, error) {
 // underlying shared library is finalized and unloaded only after the final
 // Client using that canonical module path closes. Close is idempotent and may be
 // called concurrently.
-func (c *Client) Close() error {
+func (c *Client) Close(ctx context.Context) error {
 	if c == nil {
 		return nil
 	}
@@ -852,12 +848,12 @@ func (c *Client) Close() error {
 		c.closed.Store(true)
 		var errs []error
 		if c.roPool != nil {
-			if err := c.roPool.Close(); err != nil {
+			if err := c.roPool.Close(ctx); err != nil {
 				errs = append(errs, err)
 			}
 		}
 		if c.rwPool != nil {
-			if err := c.rwPool.Close(); err != nil {
+			if err := c.rwPool.Close(ctx); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -871,7 +867,3 @@ func (c *Client) Close() error {
 	})
 	return c.closeErr
 }
-
-// rawModule returns the internally owned raw context. It must never escape the
-// managed operation that requested it.
-func (c *Client) rawModule() raw.Module { return c.module.raw }

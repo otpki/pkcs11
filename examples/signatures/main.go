@@ -24,7 +24,7 @@ func main() {
 		Vendors: all.Modules(),
 	})
 	check(err)
-	defer func() { check(client.Close()) }()
+	defer func() { check(client.Close(ctx)) }()
 
 	message := []byte("one message, several HSM signature families")
 	digest := sha256.Sum256(message)

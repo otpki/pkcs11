@@ -8,6 +8,7 @@
 package vendorkit
 
 import (
+	"errors"
 	"fmt"
 
 	pkcs11 "github.com/otpki/pkcs11"
@@ -89,7 +90,7 @@ type DecoratedModule struct {
 // on base. To change behavior, implement a normal VendorModule type instead.
 func Decorate(base pkcs11.VendorModule, update func(*pkcs11.VendorDefinition)) (*DecoratedModule, error) {
 	if base == nil {
-		return nil, fmt.Errorf("vendorkit: base vendor module is nil")
+		return nil, errors.New("vendorkit: base vendor module is nil")
 	}
 	definition := pkcs11.CloneVendorDefinition(base.Definition())
 	if update != nil {

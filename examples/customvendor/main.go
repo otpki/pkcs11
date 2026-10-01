@@ -24,7 +24,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer client.Close() // handle this error in a production service
+	defer func() { _ = client.Close(ctx) }() // handle this error in a production service
 
 	log.Printf("selected vendor=%s token=%s", client.Adapter().Family, client.Device().Fingerprint.Token.Label)
 }

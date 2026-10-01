@@ -210,7 +210,7 @@ func cancelFlagsForOperations(operations map[string]bool) uint {
 
 func methodIdempotent(method string) bool {
 	switch method {
-	case methodDescribe,
+	case methodDescribe, methodListRoutes,
 		"GetInfo", "GetFunctionList", "GetInterface", "GetInterfaceList",
 		"GetSlotList", "GetSlotInfo", "GetTokenInfo", "GetMechanismList", "GetMechanismInfo",
 		"GetSessionInfo", "GetObjectSize", "GetAttributeValue", "GetSessionValidationFlags", "AsyncGetID":

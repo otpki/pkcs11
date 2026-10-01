@@ -49,6 +49,8 @@ func newSessionWorker() *sessionWorker {
 
 // do starts call on the worker's pinned thread. Context cancellation can abort
 // queueing, but cannot interrupt a C function after execution has begun.
+//
+//nolint:contextcheck // Nil callers intentionally fall back to a detached context.
 func (w *sessionWorker) do(ctx context.Context, call func() error) error {
 	if w == nil {
 		return call()

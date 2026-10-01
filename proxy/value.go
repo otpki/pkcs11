@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"unsafe"
@@ -79,7 +80,7 @@ func encodeReflectValue(value reflect.Value, registry *CodecRegistry) (wireValue
 		return wireValue{Kind: valueParameter, Parameter: parameter}, nil
 	}
 	if value.Type() == unsafePointerType || value.Kind() == reflect.UnsafePointer {
-		return wireValue{}, fmt.Errorf("pkcs11 proxy: unsafe pointers cannot cross the wire")
+		return wireValue{}, errors.New("pkcs11 proxy: unsafe pointers cannot cross the wire")
 	}
 	switch value.Kind() {
 	case reflect.Pointer:
@@ -115,7 +116,7 @@ func encodeReflectValue(value reflect.Value, registry *CodecRegistry) (wireValue
 		if value.Type().Elem().Kind() == reflect.Uint8 {
 			data := make([]byte, value.Len())
 			for i := range data {
-				data[i] = byte(value.Index(i).Uint())
+				data[i] = byte(value.Index(i).Uint()) //nolint:gosec // G115: element kind is Uint8, so the value is already bounded.
 			}
 			return wireValue{Kind: valueBytes, Bytes: data}, nil
 		}
@@ -156,7 +157,7 @@ func encodeReflectValue(value reflect.Value, registry *CodecRegistry) (wireValue
 
 func decodeWireValue(encoded wireValue, target reflect.Type, registry *CodecRegistry) (reflect.Value, error) {
 	if target == nil {
-		return reflect.Value{}, fmt.Errorf("pkcs11 proxy: nil target type")
+		return reflect.Value{}, errors.New("pkcs11 proxy: nil target type")
 	}
 	if target == anyType || target.Kind() == reflect.Interface {
 		if encoded.Kind == valueNil {
@@ -216,8 +217,8 @@ func decodeWireValue(encoded wireValue, target reflect.Type, registry *CodecRegi
 		}
 		bits := target.Bits()
 		if bits < 64 {
-			min, max := -(int64(1) << (bits - 1)), (int64(1)<<(bits-1))-1
-			if encoded.Int < min || encoded.Int > max {
+			lo, hi := -(int64(1) << (bits - 1)), (int64(1)<<(bits-1))-1
+			if encoded.Int < lo || encoded.Int > hi {
 				return reflect.Value{}, fmt.Errorf("pkcs11 proxy: %d overflows %s", encoded.Int, target)
 			}
 		}
@@ -274,7 +275,7 @@ func decodeWireValue(encoded wireValue, target reflect.Type, registry *CodecRegi
 		fields := make(map[string]wireValue, len(encoded.Fields))
 		for _, field := range encoded.Fields {
 			if field.Name == "" {
-				return reflect.Value{}, fmt.Errorf("pkcs11 proxy: empty struct field name")
+				return reflect.Value{}, errors.New("pkcs11 proxy: empty struct field name")
 			}
 			if _, exists := fields[field.Name]; exists {
 				return reflect.Value{}, fmt.Errorf("pkcs11 proxy: duplicate struct field %q", field.Name)
@@ -349,7 +350,7 @@ func validateWireValue(value wireValue) error {
 		switch current.Kind {
 		case valueNil, valueBool, valueUint, valueInt, valueString, valueBytes:
 			if len(current.Items) != 0 || len(current.Fields) != 0 {
-				return fmt.Errorf("pkcs11 proxy: scalar wire value contains children")
+				return errors.New("pkcs11 proxy: scalar wire value contains children")
 			}
 		case valueList:
 			for _, item := range current.Items {
@@ -361,7 +362,7 @@ func validateWireValue(value wireValue) error {
 			seen := make(map[string]struct{}, len(current.Fields))
 			for _, field := range current.Fields {
 				if field.Name == "" {
-					return fmt.Errorf("pkcs11 proxy: empty struct field name")
+					return errors.New("pkcs11 proxy: empty struct field name")
 				}
 				if _, exists := seen[field.Name]; exists {
 					return fmt.Errorf("pkcs11 proxy: duplicate struct field %q", field.Name)
@@ -373,10 +374,10 @@ func validateWireValue(value wireValue) error {
 			}
 		case valueParameter:
 			if current.Parameter.Kind == "" {
-				return fmt.Errorf("pkcs11 proxy: empty parameter kind")
+				return errors.New("pkcs11 proxy: empty parameter kind")
 			}
 		case valueInvalid:
-			return fmt.Errorf("pkcs11 proxy: invalid wire value kind")
+			return errors.New("pkcs11 proxy: invalid wire value kind")
 		default:
 			return fmt.Errorf("pkcs11 proxy: unknown wire value kind %d", current.Kind)
 		}
@@ -472,7 +473,6 @@ func wipeReflectValue(value reflect.Value, seen map[uintptr]struct{}) {
 		}
 	case reflect.Struct:
 		for _, field := range value.Fields() {
-			field := field
 			if field.CanInterface() {
 				wipeReflectValue(field, seen)
 			}
@@ -491,7 +491,7 @@ func wipeReflectValue(value reflect.Value, seen map[uintptr]struct{}) {
 func assignDecoded(destination any, encoded wireValue, registry *CodecRegistry) error {
 	pointer := reflect.ValueOf(destination)
 	if !pointer.IsValid() || pointer.Kind() != reflect.Pointer || pointer.IsNil() {
-		return fmt.Errorf("pkcs11 proxy: result destination must be a non-nil pointer")
+		return errors.New("pkcs11 proxy: result destination must be a non-nil pointer")
 	}
 	value, err := decodeWireValue(encoded, pointer.Elem().Type(), registry)
 	if err != nil {

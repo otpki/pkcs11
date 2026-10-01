@@ -3,6 +3,7 @@
 package awscloudhsm
 
 import (
+	"errors"
 	"fmt"
 
 	pkcs11 "github.com/otpki/pkcs11"
@@ -72,14 +73,14 @@ func (*Module) Definition() pkcs11.VendorDefinition {
 // NormalizeMechanism applies CloudHSM OAEP restrictions and generated-IV GCM semantics.
 func (*Module) NormalizeMechanism(context pkcs11.VendorMechanismContext, mechanism *raw.Mechanism) (*raw.Mechanism, error) {
 	if mechanism == nil {
-		return nil, fmt.Errorf("awscloudhsm: nil mechanism")
+		return nil, errors.New("awscloudhsm: nil mechanism")
 	}
 	result := &raw.Mechanism{Mechanism: mechanism.Mechanism, Parameter: mechanism.Parameter}
 	if params, ok := result.Parameter.(raw.OAEPParams); ok && len(params.SourceData) != 0 {
-		return nil, fmt.Errorf("awscloudhsm: non-empty RSA-OAEP labels are not supported")
+		return nil, errors.New("awscloudhsm: non-empty RSA-OAEP labels are not supported")
 	}
 	if params, ok := result.Parameter.(*raw.OAEPParams); ok && params != nil && len(params.SourceData) != 0 {
-		return nil, fmt.Errorf("awscloudhsm: non-empty RSA-OAEP labels are not supported")
+		return nil, errors.New("awscloudhsm: non-empty RSA-OAEP labels are not supported")
 	}
 	if result.Mechanism != raw.CKM_AES_GCM || !context.Device.Capabilities.HasMechanism(MechanismAESGCM) {
 		return result, nil
@@ -90,14 +91,14 @@ func (*Module) NormalizeMechanism(context pkcs11.VendorMechanismContext, mechani
 	case nil:
 		params = &raw.GCMParams{}
 	case raw.GCMParams:
-		copy := value
-		params = &copy
+		copied := value
+		params = &copied
 	case *raw.GCMParams:
 		if value != nil {
-			copy := *value
-			copy.IV = append([]byte(nil), value.IV...)
-			copy.AAD = append([]byte(nil), value.AAD...)
-			params = &copy
+			copied := *value
+			copied.IV = append([]byte(nil), value.IV...)
+			copied.AAD = append([]byte(nil), value.AAD...)
+			params = &copied
 		}
 	default:
 		return nil, fmt.Errorf("awscloudhsm: AES-GCM requires raw.GCMParams, got %T", result.Parameter)

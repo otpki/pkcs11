@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -45,10 +46,10 @@ func writeMessage(writer io.Writer, value any, maximum int) error {
 	}
 	defer wipe(encoded)
 	if len(encoded) > int(^uint32(0)) {
-		return fmt.Errorf("pkcs11 proxy: message exceeds uint32 framing")
+		return errors.New("pkcs11 proxy: message exceeds uint32 framing")
 	}
 	var length [4]byte
-	binary.BigEndian.PutUint32(length[:], uint32(len(encoded)))
+	binary.BigEndian.PutUint32(length[:], uint32(len(encoded))) //nolint:gosec // G115: guarded by the uint32 bound check above.
 	if err := writeAll(writer, length[:]); err != nil {
 		return err
 	}
@@ -97,26 +98,29 @@ func readMessage(reader io.Reader, value any, maximum int) error {
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		if err == nil {
-			return fmt.Errorf("pkcs11 proxy: trailing JSON value")
+			return errors.New("pkcs11 proxy: trailing JSON value")
 		}
 		return fmt.Errorf("pkcs11 proxy: trailing message data: %w", err)
 	}
 	return nil
 }
 
-func dialContext(ctx context.Context, target Target) (net.Conn, error) {
+// dialContext connects to one specific proxy endpoint. Endpoint selection
+// happens only while establishing a logical client; every call afterward dials
+// the endpoint that client's Describe pinned.
+func dialContext(ctx context.Context, target Target, endpoint string) (net.Conn, error) {
 	dialer := target.Dialer
 	if dialer == nil {
 		dialer = &net.Dialer{Timeout: target.ConnectTimeout}
 	}
-	connection, err := dialer.DialContext(ctx, "tcp", target.Endpoint)
+	connection, err := dialer.DialContext(ctx, "tcp", endpoint)
 	if err != nil {
 		return nil, err
 	}
 	if target.TLS == nil {
 		if !target.AllowInsecure {
 			_ = connection.Close()
-			return nil, fmt.Errorf("pkcs11 proxy: TLS is required unless AllowInsecure is explicitly enabled")
+			return nil, errors.New("pkcs11 proxy: TLS is required unless AllowInsecure is explicitly enabled")
 		}
 		return connection, nil
 	}
@@ -125,7 +129,7 @@ func dialContext(ctx context.Context, target Target) (net.Conn, error) {
 		config.ServerName = target.ServerName
 	}
 	if config.ServerName == "" {
-		host, _, splitErr := net.SplitHostPort(target.Endpoint)
+		host, _, splitErr := net.SplitHostPort(endpoint)
 		if splitErr == nil {
 			config.ServerName = host
 		}
@@ -138,7 +142,7 @@ func dialContext(ctx context.Context, target Target) (net.Conn, error) {
 	return tlsConnection, nil
 }
 
-func applyConnectionDeadline(connection net.Conn, ctx context.Context, fallback time.Duration) {
+func applyConnectionDeadline(ctx context.Context, connection net.Conn, fallback time.Duration) {
 	deadline, ok := ctx.Deadline()
 	if !ok && fallback > 0 {
 		deadline, ok = time.Now().Add(fallback), true

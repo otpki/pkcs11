@@ -3,6 +3,7 @@ package pkcs11
 import (
 	"context"
 	"crypto"
+	"errors"
 	"fmt"
 
 	"github.com/otpki/pkcs11/raw"
@@ -85,10 +86,10 @@ func (c *Client) Digest(ctx context.Context, data []byte, options DigestOptions)
 	}
 	var digest []byte
 	err = c.withSession(ctx, sessionOptions{Operation: "digest", Idempotent: true}, func(session *sessionLease) error {
-		if err := session.DigestInit([]*raw.Mechanism{raw.NewMechanism(mechanism, options.MechanismParameter)}); err != nil {
+		if err := session.DigestInit(ctx, []*raw.Mechanism{raw.NewMechanism(mechanism, options.MechanismParameter)}); err != nil {
 			return err
 		}
-		digest, err = session.Digest(data)
+		digest, err = session.Digest(ctx, data)
 		return err
 	})
 	return digest, err
@@ -104,7 +105,7 @@ func cipherAlgorithm(key ObjectRef, requested Algorithm) (Algorithm, error) {
 	if key.KeyType == raw.CKK_RSA {
 		return AlgorithmRSA, nil
 	}
-	return "", fmt.Errorf("pkcs11: cipher algorithm is required when the object reference does not identify it")
+	return "", errors.New("pkcs11: cipher algorithm is required when the object reference does not identify it")
 }
 
 // prepareCipherIntent resolves public defaults before mechanism routing. The IV
@@ -130,7 +131,7 @@ func (c *Client) prepareCipherIntent(ctx context.Context, operation Operation, k
 				}
 			}
 			if len(iv) == 0 && operation == OperationDecrypt && cipherBehavior.gcmIVMode != VendorGCMIVCiphertextPrefix {
-				return Intent{}, nil, fmt.Errorf("pkcs11: AES-GCM decryption requires the IV returned by Encrypt")
+				return Intent{}, nil, errors.New("pkcs11: AES-GCM decryption requires the IV returned by Encrypt")
 			}
 		case CipherModeCBC, CipherModeCTR:
 			if len(iv) != 16 {
@@ -165,9 +166,9 @@ func retainGCMParameter(route *Route) *raw.GCMParams {
 	}
 	switch parameter := route.Mechanism.Parameter.(type) {
 	case raw.GCMParams:
-		copy := parameter
-		route.Mechanism.Parameter = &copy
-		return &copy
+		copied := parameter
+		route.Mechanism.Parameter = &copied
+		return &copied
 	case *raw.GCMParams:
 		return parameter
 	default:
@@ -214,14 +215,14 @@ func (c *Client) Encrypt(ctx context.Context, key ObjectRef, plaintext []byte, o
 	gcm := retainGCMParameter(&route)
 	var ciphertext []byte
 	err = c.withSession(ctx, sessionOptions{Operation: "encrypt"}, func(session *sessionLease) error {
-		handle, err := resolveObject(session, key)
+		handle, err := resolveObject(ctx, session, key)
 		if err != nil {
 			return err
 		}
-		if err := session.EncryptInit([]*raw.Mechanism{route.Mechanism}, handle); err != nil {
+		if err := session.EncryptInit(ctx, []*raw.Mechanism{route.Mechanism}, handle); err != nil {
 			return fmt.Errorf("pkcs11: encrypt init with %s: %w", mechanismDescription(route.Mechanism), err)
 		}
-		ciphertext, err = session.Encrypt(plaintext)
+		ciphertext, err = session.Encrypt(ctx, plaintext)
 		if err != nil {
 			return fmt.Errorf("pkcs11: encrypt with %s: %w", mechanismDescription(route.Mechanism), err)
 		}
@@ -261,14 +262,14 @@ func (c *Client) Decrypt(ctx context.Context, key ObjectRef, ciphertext []byte, 
 	}
 	var plaintext []byte
 	err = c.withSession(ctx, sessionOptions{Operation: "decrypt", Idempotent: true}, func(session *sessionLease) error {
-		handle, err := resolveObject(session, key)
+		handle, err := resolveObject(ctx, session, key)
 		if err != nil {
 			return err
 		}
-		if err := session.DecryptInit([]*raw.Mechanism{route.Mechanism}, handle); err != nil {
+		if err := session.DecryptInit(ctx, []*raw.Mechanism{route.Mechanism}, handle); err != nil {
 			return fmt.Errorf("pkcs11: decrypt init with %s: %w", mechanismDescription(route.Mechanism), err)
 		}
-		plaintext, err = session.Decrypt(ciphertext)
+		plaintext, err = session.Decrypt(ctx, ciphertext)
 		if err != nil {
 			return fmt.Errorf("pkcs11: decrypt with %s: %w", mechanismDescription(route.Mechanism), err)
 		}
@@ -302,14 +303,14 @@ func (c *Client) MAC(ctx context.Context, key ObjectRef, data []byte, options MA
 	}
 	var mac []byte
 	err = c.withSession(ctx, sessionOptions{Operation: "mac", Idempotent: true}, func(session *sessionLease) error {
-		handle, err := resolveObject(session, key)
+		handle, err := resolveObject(ctx, session, key)
 		if err != nil {
 			return err
 		}
-		if err := session.SignInit([]*raw.Mechanism{route.Mechanism}, handle); err != nil {
+		if err := session.SignInit(ctx, []*raw.Mechanism{route.Mechanism}, handle); err != nil {
 			return err
 		}
-		mac, err = session.Sign(data)
+		mac, err = session.Sign(ctx, data)
 		return err
 	})
 	return mac, err
@@ -327,13 +328,13 @@ func (c *Client) VerifyMAC(ctx context.Context, key ObjectRef, data, mac []byte,
 		return err
 	}
 	return c.withSession(ctx, sessionOptions{Operation: "verify-mac", Idempotent: true}, func(session *sessionLease) error {
-		handle, err := resolveObject(session, key)
+		handle, err := resolveObject(ctx, session, key)
 		if err != nil {
 			return err
 		}
-		if err := session.VerifyInit([]*raw.Mechanism{route.Mechanism}, handle); err != nil {
+		if err := session.VerifyInit(ctx, []*raw.Mechanism{route.Mechanism}, handle); err != nil {
 			return err
 		}
-		return session.Verify(data, mac)
+		return session.Verify(ctx, data, mac)
 	})
 }

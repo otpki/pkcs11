@@ -2,4 +2,24 @@
 .idea
 reports
 *.test
+*.out
 .DS_Store
+
+# Compiled binaries, release packaging output, aqua-managed dev tools.
+pkcs11-proxy
+testclient
+*.exe
+dist/
+.tool/
+
+# Local runtime artifacts — dev PKI, audit logs, keys, env files, and
+# machine-local config never belong in an image build context. Vendor
+# conformance fixture trees must stay: their Dockerfiles COPY them in.
+pki/
+*.key
+*.pem
+*.log
+audit*.log*
+.env
+.env.*
+pkcs11-proxy.yaml

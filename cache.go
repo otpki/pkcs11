@@ -289,8 +289,8 @@ func (c *tokenCache) pruneAttributesLocked(now time.Time) {
 // evictOldestObjectLocked creates room for one insertion when the object cache
 // is at capacity. A negative maximum means unbounded. c.mu must be held.
 func (c *tokenCache) evictOldestObjectLocked() {
-	max := c.config.ObjectMaxEntries
-	if max < 0 || len(c.objects) < max {
+	maxEntries := c.config.ObjectMaxEntries
+	if maxEntries < 0 || len(c.objects) < maxEntries {
 		return
 	}
 	var oldestKey string
@@ -309,8 +309,8 @@ func (c *tokenCache) evictOldestObjectLocked() {
 // evictOldestAttributeLocked creates room for one insertion when the attribute
 // cache is at capacity. A negative maximum means unbounded. c.mu must be held.
 func (c *tokenCache) evictOldestAttributeLocked() {
-	max := c.config.AttributeMaxEntries
-	if max < 0 || len(c.attributes) < max {
+	maxEntries := c.config.AttributeMaxEntries
+	if maxEntries < 0 || len(c.attributes) < maxEntries {
 		return
 	}
 	var oldestKey string

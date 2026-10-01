@@ -3,7 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
-	"fmt"
+	"slices"
 
 	pkcs11 "github.com/otpki/pkcs11"
 	"github.com/otpki/pkcs11/raw"
@@ -189,9 +189,9 @@ func (client *logicalClient) object(handle raw.ObjectHandle) (*virtualObject, er
 	client.objectsMu.Lock()
 	object := client.objects[handle]
 	if object != nil {
-		copy := *object
-		copy.id = append([]byte(nil), object.id...)
-		object = &copy
+		copied := *object
+		copied.id = append([]byte(nil), object.id...)
+		object = &copied
 	}
 	client.objectsMu.Unlock()
 	if object == nil {
@@ -233,16 +233,16 @@ func (borrows *objectBorrowSet) borrow(owner *virtualSession) error {
 	return nil
 }
 
-func (borrows *objectBorrowSet) close() error {
+func (borrows *objectBorrowSet) close(ctx context.Context) error {
 	if borrows == nil {
 		return nil
 	}
-	for index := len(borrows.owners) - 1; index >= 0; index-- {
-		borrows.owners[index].lifetime.RUnlock()
+	for _, owner := range slices.Backward(borrows.owners) {
+		owner.lifetime.RUnlock()
 	}
 	var errs []error
 	for _, owner := range borrows.owners {
-		errs = append(errs, owner.releaseIfIdle(borrows.target))
+		errs = append(errs, owner.releaseIfIdle(ctx, borrows.target))
 	}
 	borrows.owners = nil
 	borrows.seen = nil
@@ -421,8 +421,4 @@ func (client *logicalClient) rollbackVirtualObjects(session *virtualSession, han
 	for _, handle := range handles {
 		client.removeObject(session, handle)
 	}
-}
-
-func ambiguousObjectError(count int) error {
-	return fmt.Errorf("pkcs11 proxy: durable object locator resolved %d objects", count)
 }

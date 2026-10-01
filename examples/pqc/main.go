@@ -14,6 +14,15 @@ import (
 )
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Fatal(r)
+		}
+	}()
+	run()
+}
+
+func run() {
 	ctx := context.Background()
 	client, err := pkcs11.Open(ctx, pkcs11.Config{
 		Module:  pkcs11.LocalModule(os.Getenv("PKCS11_MODULE")),
@@ -25,9 +34,9 @@ func main() {
 		PIN:   pkcs11.StaticPIN(os.Getenv("PKCS11_PIN")),
 	})
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	defer client.Close() //nolint:errcheck
+	defer func() { _ = client.Close(ctx) }()
 
 	signer, pair, err := client.GenerateSigner(ctx,
 		pkcs11.KeyPairOptions{
@@ -41,17 +50,17 @@ func main() {
 		pkcs11.SignerConfig{},
 	)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
 	message := []byte("message signed directly by ML-DSA")
 	signature, err := signer.SignContext(ctx, message, pkcs11.PQCDirect(nil, pkcs11.HedgePreferred))
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	log.Printf("public ID=%x signature bytes=%d", pair.Public.ID, len(signature))
 	if err := client.Verify(ctx, pair.Public, message, signature, pkcs11.PQCDirect(nil, pkcs11.HedgePreferred)); err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
 	// ML-DSA also supports external prehash plus a domain-separation context.
@@ -60,10 +69,10 @@ func main() {
 	prehashOptions := pkcs11.PQCPrehash(crypto.SHA256, []byte("example-context"), pkcs11.HedgePreferred)
 	prehashSignature, err := signer.SignContext(ctx, prehash[:], prehashOptions)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	if err := client.Verify(ctx, pair.Public, prehash[:], prehashSignature, prehashOptions); err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
 	// ML-KEM returns the ciphertext in Go memory and keeps both shared secrets in
@@ -76,7 +85,7 @@ func main() {
 		ID:        []byte("example-ml-kem-768-v1"),
 	})
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	exportable := pkcs11.DefaultSecretKeyPolicy()
 	exportable.Token = true
@@ -87,7 +96,7 @@ func main() {
 		SecretPolicy: &exportable,
 	})
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	decapsulated, err := client.Decapsulate(ctx, kemPair.Private, encapsulation.Ciphertext, pkcs11.KEMOptions{
 		Algorithm:    pkcs11.AlgorithmMLKEM768,
@@ -95,15 +104,15 @@ func main() {
 		SecretPolicy: &exportable,
 	})
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	left, err := client.ExportValue(ctx, encapsulation.Secret)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	right, err := client.ExportValue(ctx, decapsulated)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	log.Printf("ML-KEM ciphertext=%d shared-secrets-match=%t", len(encapsulation.Ciphertext), bytes.Equal(left, right))
 	for _, object := range []pkcs11.ObjectRef{

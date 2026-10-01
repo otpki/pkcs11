@@ -45,8 +45,10 @@ func gpProfile() base.Profile {
 		base.Case{Name: "import-aes-256", Kind: "import-secret", Requirement: base.Required, Algorithm: pkcs11.AlgorithmAES256},
 		// The simulator firmware accepts a corrupted Ed448 signature at verify
 		// time, so the shared case cannot pass; keep it documented but off.
-		base.Case{Name: "ed448", Kind: "sign", Requirement: base.Disabled, Algorithm: pkcs11.AlgorithmEd448,
-			Notes: "gp simulator returns CKR_OK when verifying a corrupted Ed448 signature"},
+		base.Case{
+			Name: "ed448", Kind: "sign", Requirement: base.Disabled, Algorithm: pkcs11.AlgorithmEd448,
+			Notes: "gp simulator returns CKR_OK when verifying a corrupted Ed448 signature",
+		},
 		emulatedConcurrentRandom(base.Required),
 	)
 	promote(cases,
@@ -85,15 +87,21 @@ func quantumProtectProfile() base.Profile {
 		base.Case{Name: "ml-kem-512", Kind: "kem", Requirement: base.Required, Algorithm: pkcs11.AlgorithmMLKEM512, PrivateAttributes: kemExportablePrivateKey()},
 		base.Case{Name: "ml-kem-768", Kind: "kem", Requirement: base.Required, Algorithm: pkcs11.AlgorithmMLKEM768, PrivateAttributes: kemExportablePrivateKey()},
 		base.Case{Name: "ml-kem-1024", Kind: "kem", Requirement: base.Required, Algorithm: pkcs11.AlgorithmMLKEM1024, PrivateAttributes: kemExportablePrivateKey()},
-		base.Case{Name: "lms", Kind: "sign", Requirement: base.Optional, Algorithm: pkcs11.AlgorithmLMS,
-			HSS: &base.HSSProfile{Levels: 1, LMSTypes: []base.NumericID{6}, LMOTSTypes: []base.NumericID{3}}},
-		base.Case{Name: "hss", Kind: "sign", Requirement: base.Optional, Algorithm: pkcs11.AlgorithmHSS,
-			HSS: &base.HSSProfile{Levels: 2, LMSTypes: []base.NumericID{6, 6}, LMOTSTypes: []base.NumericID{3, 3}}},
+		base.Case{
+			Name: "lms", Kind: "sign", Requirement: base.Optional, Algorithm: pkcs11.AlgorithmLMS,
+			HSS: &base.HSSProfile{Levels: 1, LMSTypes: []base.NumericID{6}, LMOTSTypes: []base.NumericID{3}},
+		},
+		base.Case{
+			Name: "hss", Kind: "sign", Requirement: base.Optional, Algorithm: pkcs11.AlgorithmHSS,
+			HSS: &base.HSSProfile{Levels: 2, LMSTypes: []base.NumericID{6, 6}, LMOTSTypes: []base.NumericID{3, 3}},
+		},
 		emulatedConcurrentRandom(base.Required),
 		// Same Ed448 verify quirk as the GP firmware: a corrupted signature is
 		// accepted, so the shared negative check cannot pass on this simulator.
-		base.Case{Name: "ed448", Kind: "sign", Requirement: base.Disabled, Algorithm: pkcs11.AlgorithmEd448,
-			Notes: "quantumprotect simulator returns CKR_OK when verifying a corrupted Ed448 signature"},
+		base.Case{
+			Name: "ed448", Kind: "sign", Requirement: base.Disabled, Algorithm: pkcs11.AlgorithmEd448,
+			Notes: "quantumprotect simulator returns CKR_OK when verifying a corrupted Ed448 signature",
+		},
 	)
 	promote(cases,
 		"object-lifecycle",

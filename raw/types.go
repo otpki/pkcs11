@@ -2,16 +2,18 @@ package raw
 
 import "strings"
 
-type SlotID uint
-type SessionHandle uint
-type ObjectHandle uint
-type MechanismType uint
-type AttributeType uint
-type Flags uint
-type UserType uint
-type State uint
-type Notification uint
-type ValidationFlagsType uint
+type (
+	SlotID              uint
+	SessionHandle       uint
+	ObjectHandle        uint
+	MechanismType       uint
+	AttributeType       uint
+	Flags               uint
+	UserType            uint
+	State               uint
+	Notification        uint
+	ValidationFlagsType uint
+)
 
 type Version struct {
 	Major uint8

@@ -25,7 +25,7 @@ func (d Date) bytes() ([]byte, error) {
 	if d.Year < 0 || d.Year > 9999 || d.Month < 1 || d.Month > 12 || d.Day < 1 || d.Day > 31 {
 		return nil, fmt.Errorf("pkcs11: invalid CK_DATE %04d-%02d-%02d", d.Year, d.Month, d.Day)
 	}
-	return []byte(fmt.Sprintf("%04d%02d%02d", d.Year, d.Month, d.Day)), nil
+	return fmt.Appendf(nil, "%04d%02d%02d", d.Year, d.Month, d.Day), nil
 }
 
 // NewAttribute follows miekg/pkcs11's constructor style. Integer values are

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	pkcs11 "github.com/otpki/pkcs11"
+	"github.com/otpki/pkcs11/internal/testmock"
 	"github.com/otpki/pkcs11/raw"
 )
 
@@ -81,6 +82,7 @@ func (proxyTestCodec) Encode(value any) ([]byte, bool, error) {
 	}
 	return []byte(text), true, nil
 }
+
 func (proxyTestCodec) Decode(payload []byte) (any, error) {
 	return proxyTestParameter(string(payload)), nil
 }
@@ -95,6 +97,7 @@ func (proxyCodecVendor) Definition() pkcs11.VendorDefinition {
 	definition.Name = "OTPKI proxy codec test module"
 	return definition
 }
+
 func (proxyCodecVendor) ProxyParameterCodecs() []ParameterCodec {
 	return []ParameterCodec{proxyTestCodec{}}
 }
@@ -168,7 +171,7 @@ type instrumentedConnection struct {
 
 func (connection *instrumentedConnection) Write(value []byte) (int, error) {
 	if connection.dropWrites && connection.dropped.CompareAndSwap(false, true) {
-		_ = connection.Conn.Close()
+		_ = connection.Close()
 		return 0, io.ErrClosedPipe
 	}
 	return connection.Conn.Write(value)
@@ -221,12 +224,12 @@ func proxyTestTLS(t *testing.T) (*tls.Config, *tls.Config) {
 	pool := x509.NewCertPool()
 	pool.AddCert(ca)
 	return &tls.Config{
-			MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{serverCertificate},
-			ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: pool,
-		}, &tls.Config{
-			MinVersion: tls.VersionTLS13, RootCAs: pool, ServerName: "localhost",
-			Certificates: []tls.Certificate{clientCertificate},
-		}
+		MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{serverCertificate},
+		ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: pool,
+	}, &tls.Config{
+		MinVersion: tls.VersionTLS13, RootCAs: pool, ServerName: "localhost",
+		Certificates: []tls.Certificate{clientCertificate},
+	}
 }
 
 type proxyHarness struct {
@@ -280,7 +283,7 @@ func newProxyHarness(t *testing.T, budget SessionBudget, mutate func(*TargetConf
 	go func() { serveDone <- server.Serve(serveContext) }()
 	t.Cleanup(func() {
 		cancel()
-		if err := server.Close(); err != nil {
+		if err := server.Close(context.Background()); err != nil {
 			t.Errorf("close proxy server: %v", err)
 		}
 		select {
@@ -298,7 +301,7 @@ func newProxyHarness(t *testing.T, budget SessionBudget, mutate func(*TargetConf
 		module:   module,
 		target: Target{
 			ConfigID: "db-config-1", Revision: config.Revision,
-			Endpoint: base.Addr().String(), Route: config.ID,
+			Endpoints: []string{base.Addr().String()}, Route: config.ID,
 			AllowInsecure: true, RequestTimeout: 5 * time.Second,
 			MaxAttempts: 2, Vendors: append([]pkcs11.VendorModule(nil), config.Client.Vendors...),
 		},
@@ -336,7 +339,7 @@ func remoteSlot(t *testing.T, client *Client) raw.SlotID {
 
 func openVirtualSession(t *testing.T, client *Client, slot raw.SlotID, readWrite bool) raw.SessionHandle {
 	t.Helper()
-	flags := uint(raw.CKF_SERIAL_SESSION)
+	flags := raw.CKF_SERIAL_SESSION
 	if readWrite {
 		flags |= raw.CKF_RW_SESSION
 	}
@@ -366,7 +369,7 @@ func TestServerMayStartWithoutTargetsAndPublishOneLater(t *testing.T) {
 		_ = listener.Close()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = server.Close() })
+	t.Cleanup(func() { _ = server.Close(context.Background()) })
 	if got := server.TargetIDs(); len(got) != 0 {
 		t.Fatalf("initial target IDs = %v, want none", got)
 	}
@@ -390,6 +393,55 @@ func TestServerMayStartWithoutTargetsAndPublishOneLater(t *testing.T) {
 	}
 }
 
+func TestListRoutesReturnsCatalog(t *testing.T) {
+	harness := newProxyHarness(t, SessionBudget{MaxPhysicalTotal: 3}, nil)
+	// Publish a second route bound to another token selector on the same module.
+	if err := harness.server.AddTarget(context.Background(), TargetConfig{
+		ID: "mock-hsm-second", Revision: "revision-2",
+		Client:   pkcs11.Config{Module: pkcs11.LocalModule(harness.module), Token: pkcs11.TokenSelector{Label: "OTPKI-MOCK"}, Vendors: []pkcs11.VendorModule{testProxyVendor}},
+		Sessions: SessionBudget{MaxPhysicalTotal: 3},
+		Login: LoginPolicy{
+			PhysicalPIN:      pkcs11.StaticPIN("1234"),
+			Authenticate:     func(context.Context, LoginAttempt) error { return nil },
+			AllowedUserTypes: []uint{raw.CKU_USER},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Discovery is server-scoped: only transport fields are required — no
+	// Route, Revision, or ConfigID.
+	routes, err := ListRoutes(context.Background(), Target{
+		Endpoints: harness.target.Endpoints, AllowInsecure: true, RequestTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 2 || routes[0].ID != "mock-hsm" || routes[1].ID != "mock-hsm-second" {
+		t.Fatalf("catalog IDs = %+v", routes)
+	}
+	if routes[0].Revision != "revision-1" || routes[1].Revision != "revision-2" {
+		t.Fatalf("catalog revisions = %+v", routes)
+	}
+	for _, route := range routes {
+		if route.TokenLabel != "OTPKI-MOCK" || route.TokenSerial != "0000000000000001" || route.SlotID != 1 {
+			t.Fatalf("route %q token metadata = %+v", route.ID, route)
+		}
+	}
+
+	// A selected route still answers its own methods after catalog discovery.
+	client := openRemoteRaw(t, harness.target)
+	if slots, err := client.GetSlotList(true); err != nil || len(slots) != 1 {
+		t.Fatalf("remote slot list = %v, %v", slots, err)
+	}
+}
+
+func TestListRoutesRequiresTransportSecurity(t *testing.T) {
+	if _, err := ListRoutes(context.Background(), Target{Endpoints: []string{"127.0.0.1:1"}}); err == nil {
+		t.Fatal("ListRoutes without TLS or AllowInsecure succeeded")
+	}
+}
+
 func TestProtectedAuthenticationPathAllowsNoPhysicalPIN(t *testing.T) {
 	module := buildProxyMockModuleWithFlags(t, "-DMOCK_PROTECTED_AUTH_PATH=1")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -409,7 +461,7 @@ func TestProtectedAuthenticationPathAllowsNoPhysicalPIN(t *testing.T) {
 		_ = listener.Close()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = server.Close() })
+	t.Cleanup(func() { _ = server.Close(context.Background()) })
 	if stats, ok := server.TargetStats("protected"); !ok || stats.PhysicalOpened != 1 {
 		t.Fatalf("protected-path target stats = %+v, ok=%v", stats, ok)
 	}
@@ -462,12 +514,12 @@ func TestMutualTLSIdentityAuthorizesLogicalLogin(t *testing.T) {
 	go func() { done <- server.Serve(serveContext) }()
 	t.Cleanup(func() {
 		cancel()
-		_ = server.Close()
+		_ = server.Close(context.Background())
 		<-done
 	})
 
 	client := openRemoteRaw(t, Target{
-		ConfigID: "mtls-config", Revision: "revision-1", Endpoint: listener.Addr().String(), Route: "mtls",
+		ConfigID: "mtls-config", Revision: "revision-1", Endpoints: []string{listener.Addr().String()}, Route: "mtls",
 		TLS: clientTLS, SecurityContextID: "proxy-test-mtls", RequestTimeout: 5 * time.Second,
 		Vendors: []pkcs11.VendorModule{testProxyVendor},
 	})
@@ -952,6 +1004,7 @@ func TestTargetReplacementRejectsStaleEpochAndRevision(t *testing.T) {
 func stringsContains(value, fragment string) bool {
 	return len(fragment) == 0 || (len(value) >= len(fragment) && contains(value, fragment))
 }
+
 func contains(value, fragment string) bool {
 	for index := 0; index+len(fragment) <= len(value); index++ {
 		if value[index:index+len(fragment)] == fragment {
@@ -972,7 +1025,7 @@ func TestManagedClientUsesRemoteModuleSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = client.Close() }()
+	defer func() { _ = client.Close(context.Background()) }()
 	if client.Adapter().Family != testProxyVendor.Definition().ID {
 		t.Fatalf("remote adapter = %q", client.Adapter().Family)
 	}
@@ -1028,7 +1081,7 @@ func TestTrustTransportIdentityRequiresVerifiedIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	module := buildProxyMockModule(t)
 	_, err = NewServer(context.Background(), ServerConfig{Listener: listener, AllowInsecure: true}, TargetConfig{
 		ID: "unsafe", Revision: "1",
@@ -1196,8 +1249,8 @@ func TestDedupFollowerSurvivesLedgerReset(t *testing.T) {
 	}
 	ledger.reset([16]byte{9})
 	replay := <-result
-	remote, ok := decodeError(replay.Error).(*RemoteError)
-	if !ok || remote.Code != "target_epoch_mismatch" {
+	var remote *RemoteError
+	if !errors.As(decodeError(replay.Error), &remote) || remote.Code != "target_epoch_mismatch" {
 		t.Fatalf("reset replay error = %#v", replay.Error)
 	}
 	ledger.close()
@@ -1215,6 +1268,28 @@ func TestValidateRequestEnvelopeRejectsMissingIdentity(t *testing.T) {
 	req.Method = "GetInfo"
 	if err := validateRequestEnvelope(req); err == nil {
 		t.Fatal("non-describe request without epoch was accepted")
+	}
+	// Established methods must also carry the pinned server identity.
+	req.Epoch[0] = 1
+	if err := validateRequestEnvelope(req); err == nil {
+		t.Fatal("non-describe request without server ID was accepted")
+	}
+	req.ServerID[0] = 1
+	if err := validateRequestEnvelope(req); err != nil {
+		t.Fatalf("valid established envelope: %v", err)
+	}
+	// The route catalog is server-scoped: it needs no target, revision, or epoch.
+	req = request{Version: protocolVersion, Method: methodListRoutes}
+	if err := validateRequestEnvelope(req); err == nil {
+		t.Fatal("@routes with zero client/request IDs was accepted")
+	}
+	req.ClientID[0], req.RequestID[0] = 1, 1
+	if err := validateRequestEnvelope(req); err != nil {
+		t.Fatalf("valid @routes envelope: %v", err)
+	}
+	req.Method = methodDescribe
+	if err := validateRequestEnvelope(req); err == nil {
+		t.Fatal("describe without target was accepted")
 	}
 }
 
@@ -1368,7 +1443,7 @@ func TestPinnedSessionIdleExpirationReleasesPhysicalLease(t *testing.T) {
 	virtual.mu.Lock()
 	virtual.lastUsed = time.Now().Add(-2 * time.Hour)
 	virtual.mu.Unlock()
-	target.sweepClients()
+	target.sweepClients(context.Background())
 
 	if _, err := client.GetSessionInfo(sessionHandle); !raw.IsError(err, raw.CKR_SESSION_HANDLE_INVALID) {
 		t.Fatalf("expired pinned session error = %v", err)
@@ -1397,7 +1472,7 @@ func TestCodecHandshakeRejectsMismatchedRegistries(t *testing.T) {
 
 func TestTargetNormalizationDoesNotDuplicateVendorCodecs(t *testing.T) {
 	target := Target{
-		ConfigID: "config", Revision: "revision", Endpoint: "127.0.0.1:1", Route: "route",
+		ConfigID: "config", Revision: "revision", Endpoints: []string{"127.0.0.1:1"}, Route: "route",
 		AllowInsecure: true, Vendors: []pkcs11.VendorModule{proxyCodecVendor{}},
 	}
 	first := target.normalized()
@@ -1415,9 +1490,9 @@ func TestTargetNormalizationDoesNotDuplicateVendorCodecs(t *testing.T) {
 
 func TestTargetSecurityContextIdentityIsRequiredForOpaqueClientPolicy(t *testing.T) {
 	for name, target := range map[string]Target{
-		"tls":    {ConfigID: "c", Revision: "r", Endpoint: "e", Route: "t", TLS: &tls.Config{}},
-		"auth":   {ConfigID: "c", Revision: "r", Endpoint: "e", Route: "t", AllowInsecure: true, Auth: func(context.Context) ([]byte, error) { return nil, nil }},
-		"dialer": {ConfigID: "c", Revision: "r", Endpoint: "e", Route: "t", AllowInsecure: true, Dialer: &net.Dialer{}},
+		"tls":    {ConfigID: "c", Revision: "r", Endpoints: []string{"e"}, Route: "t", TLS: &tls.Config{}},
+		"auth":   {ConfigID: "c", Revision: "r", Endpoints: []string{"e"}, Route: "t", AllowInsecure: true, Auth: func(context.Context) ([]byte, error) { return nil, nil }},
+		"dialer": {ConfigID: "c", Revision: "r", Endpoints: []string{"e"}, Route: "t", AllowInsecure: true, Dialer: &net.Dialer{}},
 	} {
 		if err := target.validate(); err == nil || !stringsContains(err.Error(), "SecurityContextID") {
 			t.Fatalf("%s validation error = %v", name, err)
@@ -1477,7 +1552,7 @@ func TestMultipleTargetsRemainFullyIsolated(t *testing.T) {
 	go func() { serveDone <- server.Serve(serveContext) }()
 	t.Cleanup(func() {
 		cancel()
-		if err := server.Close(); err != nil {
+		if err := server.Close(context.Background()); err != nil {
 			t.Errorf("close multi-target server: %v", err)
 		}
 		select {
@@ -1493,7 +1568,7 @@ func TestMultipleTargetsRemainFullyIsolated(t *testing.T) {
 	remoteTarget := func(route string) Target {
 		return Target{
 			ConfigID: "db-" + route, Revision: "revision-1",
-			Endpoint: base.Addr().String(), Route: route,
+			Endpoints: []string{base.Addr().String()}, Route: route,
 			AllowInsecure: true, RequestTimeout: 5 * time.Second,
 			Vendors: []pkcs11.VendorModule{testProxyVendor},
 		}
@@ -1619,14 +1694,14 @@ func TestLogicalClientIDIsBoundToAuthenticatedPrincipal(t *testing.T) {
 	go func() { serveDone <- server.Serve(serveContext) }()
 	t.Cleanup(func() {
 		cancel()
-		_ = server.Close()
+		_ = server.Close(context.Background())
 		<-serveDone
 	})
 
 	newTarget := func(principal string) Target {
 		return Target{
 			ConfigID: "config-" + principal, Revision: "revision-1",
-			Endpoint: base.Addr().String(), Route: "principal-hsm",
+			Endpoints: []string{base.Addr().String()}, Route: "principal-hsm",
 			AllowInsecure: true, SecurityContextID: principal,
 			Auth:    func(context.Context) ([]byte, error) { return []byte(principal), nil },
 			Vendors: []pkcs11.VendorModule{testProxyVendor},
@@ -1728,7 +1803,7 @@ func TestProtectedAuthenticationPathDoesNotRequirePhysicalPINProvider(t *testing
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(context.Background()) }()
 	t.Cleanup(func() {
-		if err := server.Close(); err != nil {
+		if err := server.Close(context.Background()); err != nil {
 			t.Errorf("close server: %v", err)
 		}
 		if err := <-serveDone; err != nil {
@@ -1738,7 +1813,7 @@ func TestProtectedAuthenticationPathDoesNotRequirePhysicalPINProvider(t *testing
 
 	client, err := Open(context.Background(), Target{
 		ConfigID: "protected-path-config", Revision: "revision-1",
-		Endpoint: listener.Addr().String(), Route: "protected-path",
+		Endpoints: []string{listener.Addr().String()}, Route: "protected-path",
 		AllowInsecure: true,
 	})
 	if err != nil {
@@ -1937,7 +2012,7 @@ func TestClientActivatedTargetRejectsSessionScopedVendor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	_, err = NewServer(context.Background(), ServerConfig{Listener: listener, AllowInsecure: true}, TargetConfig{
 		ID: "session-login", Revision: "revision-1",
 		Client:   pkcs11.Config{Module: pkcs11.LocalModule(module), Vendors: []pkcs11.VendorModule{testProxySessionVendor}},
@@ -1958,7 +2033,7 @@ func TestClientActivatedTargetRequiresExplicitMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	_, err = NewServer(context.Background(), ServerConfig{Listener: listener, AllowInsecure: true}, TargetConfig{
 		ID: "missing-mode", Revision: "revision-1",
 		Client:   pkcs11.Config{Module: pkcs11.LocalModule(module), Vendors: []pkcs11.VendorModule{testProxyVendor}},
@@ -2040,7 +2115,7 @@ func TestAuthenticationAndAuthorizationAreSeparateForClientActivation(t *testing
 		Listener: listener, AllowInsecure: true,
 		Authenticator: func(_ context.Context, identity RequestIdentity) (string, error) {
 			if string(identity.Auth) != workloadToken {
-				return "", fmt.Errorf("invalid workload token")
+				return "", errors.New("invalid workload token")
 			}
 			return "issuer-workload", nil
 		},
@@ -2050,12 +2125,12 @@ func TestAuthenticationAndAuthorizationAreSeparateForClientActivation(t *testing
 		Sessions: SessionBudget{MaxPhysicalTotal: 4},
 		Authorize: func(_ context.Context, request AuthorizationRequest) error {
 			if request.Identity.Principal != "issuer-workload" {
-				return fmt.Errorf("principal is not allowed")
+				return errors.New("principal is not allowed")
 			}
 			if request.PhysicalActivation {
 				activationAuthorizations.Add(1)
 				if request.Operation != AuthorizationOperationActivateTarget {
-					return fmt.Errorf("unexpected activation operation")
+					return errors.New("unexpected activation operation")
 				}
 			}
 			return nil
@@ -2072,14 +2147,14 @@ func TestAuthenticationAndAuthorizationAreSeparateForClientActivation(t *testing
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(context.Background()) }()
 	t.Cleanup(func() {
-		_ = server.Close()
+		_ = server.Close(context.Background())
 		if err := <-serveDone; err != nil {
 			t.Errorf("serve: %v", err)
 		}
 	})
 
 	target := Target{
-		ConfigID: "authorized-config", Revision: "revision-1", Endpoint: base.Addr().String(), Route: "authorized-activation",
+		ConfigID: "authorized-config", Revision: "revision-1", Endpoints: []string{base.Addr().String()}, Route: "authorized-activation",
 		AllowInsecure: true, SecurityContextID: "issuer-workload-token",
 		Auth:    func(context.Context) ([]byte, error) { return []byte(workloadToken), nil },
 		Vendors: []pkcs11.VendorModule{testProxyVendor},
@@ -2112,7 +2187,7 @@ func TestManagedClientActivateSuppliesPhysicalPINToClientActivatedTarget(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer managed.Close()
+	defer func() { _ = managed.Close(context.Background()) }()
 	if err := managed.Activate(context.Background()); err != nil {
 		t.Fatalf("managed Activate: %v", err)
 	}
@@ -2139,7 +2214,7 @@ func TestActivationAuthorizationDenialPreventsPhysicalPINAttempt(t *testing.T) {
 		config.Login.PhysicalPIN = nil
 		config.Authorize = func(_ context.Context, request AuthorizationRequest) error {
 			if request.PhysicalActivation {
-				return fmt.Errorf("activation requires elevated permission")
+				return errors.New("activation requires elevated permission")
 			}
 			return nil
 		}
@@ -2212,5 +2287,345 @@ func TestClientActivationDefaultCooldownPreventsRapidSequentialPINAttempts(t *te
 	}
 	if got := diagnostic(t, client, slot, mockDiagLoginCalls); got != 1 {
 		t.Fatalf("rapid sequential failed activations caused %d physical attempts, want 1", got)
+	}
+}
+
+// --- Active-active multi-replica behavior ---------------------------------
+
+// testmockBrokerConfig is a complete route binding to the in-memory test
+// module. No vendor modules are configured, so both the broker registry and
+// the client use the empty codec set — matching is trivially satisfied.
+func testmockBrokerConfig(source pkcs11.ModuleSource) TargetConfig {
+	slot := raw.SlotID(1)
+	return TargetConfig{
+		ID:       "shared-hsm",
+		Revision: "v1",
+		Client:   pkcs11.Config{Module: source, Token: pkcs11.TokenSelector{SlotID: &slot}},
+		Sessions: SessionBudget{MaxPhysicalTotal: 8, MaxClients: 1024},
+		Login: LoginPolicy{
+			PhysicalPIN:      pkcs11.StaticPIN(testmock.DefaultPIN),
+			Authenticate:     func(context.Context, LoginAttempt) error { return nil },
+			AllowedUserTypes: []uint{raw.CKU_USER},
+		},
+	}
+}
+
+// newTestmockBroker starts a proxy replica on an ephemeral loopback port. The
+// same ModuleSource in two brokers shares one virtual HSM through the managed
+// registry — the same shape as two proxies in front of one HSM HA cluster.
+func newTestmockBroker(t *testing.T, config TargetConfig) (*Server, string) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(context.Background(), ServerConfig{Listener: listener, AllowInsecure: true}, config)
+	if err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	go func() { _ = server.Serve(context.Background()) }()
+	t.Cleanup(func() { _ = server.Close(context.Background()) })
+	return server, listener.Addr().String()
+}
+
+func haTarget(endpoints ...string) Target {
+	return Target{
+		ConfigID: "ha-test", Revision: "v1", Route: "shared-hsm",
+		Endpoints: endpoints, AllowInsecure: true,
+		ConnectTimeout: 300 * time.Millisecond, RequestTimeout: 5 * time.Second,
+		MaxAttempts: 1,
+	}
+}
+
+func TestMultiEndpointDistributionAndPinning(t *testing.T) {
+	source := testmock.Source{Name: "ha-shared", Tokens: 2}
+	config := testmockBrokerConfig(source)
+	serverA, addrA := newTestmockBroker(t, config)
+	serverB, addrB := newTestmockBroker(t, config)
+	byEndpoint := map[string]*Server{addrA: serverA, addrB: serverB}
+
+	const total = 60
+	counts := map[string]int{}
+	clients := make([]*Client, 0, total)
+	defer func() {
+		for _, client := range clients {
+			_ = client.Close()
+		}
+	}()
+	for range total {
+		client, err := Open(context.Background(), haTarget(addrA, addrB))
+		if err != nil {
+			t.Fatal(err)
+		}
+		server, ok := byEndpoint[client.Endpoint()]
+		if !ok {
+			t.Fatalf("client pinned to unconfigured endpoint %q", client.Endpoint())
+		}
+		if client.ServerID() != server.InstanceID() {
+			t.Fatalf("client server ID does not match its pinned endpoint")
+		}
+		counts[client.Endpoint()]++
+		clients = append(clients, client)
+	}
+	if counts[addrA] == 0 || counts[addrB] == 0 {
+		t.Fatalf("rendezvous distribution used only one replica: %v", counts)
+	}
+	if counts[addrA] < 10 || counts[addrB] < 10 {
+		t.Fatalf("rendezvous distribution far from balanced: %v", counts)
+	}
+	// After Initialize each logical client lives on its pinned server only.
+	for _, client := range clients {
+		if err := client.Initialize(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := serverA.LogicalClients(); got != counts[addrA] {
+		t.Fatalf("server A logical clients = %d, want %d", got, counts[addrA])
+	}
+	if got := serverB.LogicalClients(); got != counts[addrB] {
+		t.Fatalf("server B logical clients = %d, want %d", got, counts[addrB])
+	}
+}
+
+func TestOpenFailsOverToNextEndpoint(t *testing.T) {
+	source := testmock.Source{Name: "ha-failover"}
+	_, alive := newTestmockBroker(t, testmockBrokerConfig(source))
+	deadListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := deadListener.Addr().String()
+	_ = deadListener.Close()
+	for range 8 {
+		client, err := Open(context.Background(), haTarget(dead, alive))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if client.Endpoint() != alive {
+			t.Fatalf("client pinned %q, want surviving endpoint %q", client.Endpoint(), alive)
+		}
+		_ = client.Close()
+	}
+}
+
+func TestPinnedClientReportsTargetLost(t *testing.T) {
+	source := testmock.Source{Name: "ha-loss"}
+	config := testmockBrokerConfig(source)
+	serverA, addrA := newTestmockBroker(t, config)
+	serverB, addrB := newTestmockBroker(t, config)
+
+	client, err := Open(context.Background(), haTarget(addrA, addrB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := client.Endpoint()
+	if err := client.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	lost, surviving := serverA, serverB
+	survivingAddr := addrB
+	if pinned == addrB {
+		lost, surviving = serverB, serverA
+		survivingAddr = addrA
+	}
+	if err := lost.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.GetInfo(); !errors.Is(err, ErrTargetLost) {
+		t.Fatalf("operation after replica loss = %v, want ErrTargetLost", err)
+	}
+	// The client never migrates: its endpoint is still the dead replica.
+	if client.Endpoint() != pinned {
+		t.Fatalf("client endpoint mutated to %q after replica loss", client.Endpoint())
+	}
+	// A brand-new logical client establishes against the surviving replica.
+	replacement, err := Open(context.Background(), haTarget(addrA, addrB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = replacement.Close() }()
+	if replacement.Endpoint() != survivingAddr {
+		t.Fatalf("replacement pinned %q, want surviving %q", replacement.Endpoint(), survivingAddr)
+	}
+	if replacement.ServerID() != surviving.InstanceID() {
+		t.Fatal("replacement server ID does not match surviving replica")
+	}
+	if err := replacement.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWrongServerFencing(t *testing.T) {
+	source := testmock.Source{Name: "ha-fence"}
+	config := testmockBrokerConfig(source)
+	serverA, _ := newTestmockBroker(t, config)
+	serverB, addrB := newTestmockBroker(t, config)
+
+	// A request envelope pinned to server A must be refused by server B before
+	// it creates or touches logical-client state.
+	connection, err := net.Dial("tcp", addrB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = connection.Close() }()
+	req := request{
+		Version: protocolVersion, Target: "shared-hsm", Revision: "v1",
+		ClientID: [16]byte{1}, RequestID: [16]byte{2},
+		ServerID: serverA.InstanceID(), Epoch: [16]byte{3},
+		Method: "GetInfo",
+	}
+	if err := writeMessage(connection, req, defaultMaximumMessageSize); err != nil {
+		t.Fatal(err)
+	}
+	var resp response
+	if err := readMessage(connection, &resp, defaultMaximumMessageSize); err != nil {
+		t.Fatal(err)
+	}
+	err = decodeError(resp.Error)
+	var remote *RemoteError
+	if !errors.As(err, &remote) || remote.Code != "wrong_server" {
+		t.Fatalf("wrong-server response = %v, want wrong_server", err)
+	}
+	if !errors.Is(err, ErrTargetLost) {
+		t.Fatalf("wrong_server error = %v, want it to map to ErrTargetLost", err)
+	}
+	if got := serverB.LogicalClients(); got != 0 {
+		t.Fatalf("fenced request created %d logical clients on server B", got)
+	}
+}
+
+func TestEpochFencingMapsTargetLost(t *testing.T) {
+	source := testmock.Source{Name: "ha-epoch"}
+	config := testmockBrokerConfig(source)
+	server, addr := newTestmockBroker(t, config)
+	client, err := Open(context.Background(), haTarget(addr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	if err := client.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	// Re-publishing the route rotates the target epoch: state owned by the old
+	// generation is unrecoverable even though the process itself survived.
+	if err := server.ReplaceTarget(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.GetInfo(); !errors.Is(err, ErrTargetLost) {
+		t.Fatalf("operation after epoch rotation = %v, want ErrTargetLost", err)
+	}
+}
+
+func TestDrainingServerServesExistingAndRefusesNew(t *testing.T) {
+	source := testmock.Source{Name: "ha-drain"}
+	config := testmockBrokerConfig(source)
+	serverA, addrA := newTestmockBroker(t, config)
+	serverB, addrB := newTestmockBroker(t, config)
+
+	// Establish one pinned client on A while it is active.
+	existing, err := Open(context.Background(), haTarget(addrA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := existing.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if got := serverA.LogicalClients(); got != 1 {
+		t.Fatalf("logical clients = %d, want 1", got)
+	}
+
+	serverA.Drain(context.Background())
+	if serverA.State() != ServerDraining {
+		t.Fatal("server did not enter draining state")
+	}
+	// The pinned client keeps working — drain refuses only new establishments.
+	if _, err := existing.GetInfo(); err != nil {
+		t.Fatalf("established request during drain failed: %v", err)
+	}
+	// New clients skip the draining replica even when it ranks first.
+	for range 10 {
+		fresh, err := Open(context.Background(), haTarget(addrA, addrB))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fresh.Endpoint() != addrB {
+			t.Fatalf("new client pinned draining endpoint %q", fresh.Endpoint())
+		}
+		_ = fresh.Close()
+	}
+	// A single-endpoint Open against a draining broker fails without a logical
+	// client ever being created.
+	if _, err := Open(context.Background(), haTarget(addrA)); err == nil {
+		t.Fatal("open against draining-only endpoint succeeded")
+	} else if !strings.Contains(err.Error(), "draining") {
+		t.Fatalf("draining open error = %v", err)
+	}
+	if got := serverA.LogicalClients(); got != 1 {
+		t.Fatalf("drain probed endpoints created clients: %d", got)
+	}
+	// WaitDrained releases only when the established client goes away.
+	blocked, cancelBlocked := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancelBlocked()
+	if err := serverA.WaitDrained(blocked); err == nil {
+		t.Fatal("WaitDrained returned with a live client")
+	}
+	if err := existing.Close(); err != nil {
+		t.Fatal(err)
+	}
+	drained, cancelDrained := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelDrained()
+	if err := serverA.WaitDrained(drained); err != nil {
+		t.Fatalf("WaitDrained after client close: %v", err)
+	}
+	if got := serverA.LogicalClients(); got != 0 {
+		t.Fatalf("logical clients after drain = %d", got)
+	}
+	_ = serverB
+}
+
+func TestScaleUpKeepsExistingPins(t *testing.T) {
+	source := testmock.Source{Name: "ha-scale"}
+	config := testmockBrokerConfig(source)
+	_, addrA := newTestmockBroker(t, config)
+	_, addrB := newTestmockBroker(t, config)
+	_, addrC := newTestmockBroker(t, config)
+
+	var established []*Client
+	for range 12 {
+		client, err := Open(context.Background(), haTarget(addrA, addrB))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := client.Initialize(); err != nil {
+			t.Fatal(err)
+		}
+		established = append(established, client)
+	}
+	defer func() {
+		for _, client := range established {
+			_ = client.Close()
+		}
+	}()
+	// New clients opened after the endpoint set grows may select C, but every
+	// established client keeps its original pin and keeps working.
+	for _, client := range established {
+		pinned := client.Endpoint()
+		grown, err := Open(context.Background(), haTarget(addrA, addrB, addrC))
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch grown.Endpoint() {
+		case addrA, addrB, addrC:
+		default:
+			t.Fatalf("new client pinned unknown endpoint %q", grown.Endpoint())
+		}
+		_ = grown.Close()
+		if client.Endpoint() != pinned {
+			t.Fatalf("existing client endpoint moved %q -> %q", pinned, client.Endpoint())
+		}
+		if _, err := client.GetInfo(); err != nil {
+			t.Fatalf("existing client broken after endpoint growth: %v", err)
+		}
 	}
 }

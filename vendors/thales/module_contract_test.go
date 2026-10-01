@@ -1,8 +1,9 @@
 package thales
 
 import (
-	"github.com/otpki/pkcs11/vendortest"
 	"testing"
+
+	"github.com/otpki/pkcs11/vendortest"
 )
 
 func TestModuleContract(t *testing.T) {

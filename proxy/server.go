@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -57,6 +58,29 @@ type Authenticator func(context.Context, RequestIdentity) (principal string, err
 // TargetConfig.Authorize for authorization.
 type Authorizer = Authenticator
 
+// ServerState reports where the proxy process sits in its lifecycle.
+type ServerState int
+
+const (
+	// ServerActive accepts new logical clients and serves all established ones.
+	ServerActive ServerState = iota
+	// ServerDraining refuses new logical clients while established clients
+	// continue until they close, idle-expire, or the drain deadline forces the
+	// process down.
+	ServerDraining
+)
+
+func (state ServerState) String() string {
+	switch state {
+	case ServerActive:
+		return "active"
+	case ServerDraining:
+		return "draining"
+	default:
+		return "unknown"
+	}
+}
+
 // ServerConfig controls the connection-facing proxy service. One request is
 // accepted per connection and the connection is always closed afterward.
 type ServerConfig struct {
@@ -85,6 +109,15 @@ type ServerConfig struct {
 	Authenticator Authenticator
 	// Authorizer is the legacy name for Authenticator. Configure at most one.
 	Authorizer Authorizer
+	// DrainTimeout bounds graceful scale-down: after Drain begins, WaitDrained
+	// waits for established logical clients to finish before targets are
+	// closed. Clients that linger past the deadline observe ErrTargetLost when
+	// the process finally stops. Zero selects the default.
+	DrainTimeout time.Duration
+	// Audit receives secret-free security events (client lifecycle, logins,
+	// activations, maintenance, and request rejections). It must be
+	// non-blocking; nil disables audit emission.
+	Audit AuditSink
 }
 
 // Server multiplexes independent client connections onto explicitly configured
@@ -92,6 +125,12 @@ type ServerConfig struct {
 // values supplied by its caller.
 type Server struct {
 	config ServerConfig
+
+	// instanceID identifies this running proxy process to clients. It is
+	// generated at startup and never persisted, so a process restart always
+	// changes it — exactly the failure boundary clients fence against.
+	instanceID [16]byte
+	state      atomic.Int32
 
 	listenerMu sync.RWMutex
 	listener   net.Listener
@@ -105,6 +144,7 @@ type Server struct {
 	handlers          sync.WaitGroup
 	serving           atomic.Bool
 	closing           atomic.Bool
+	obs               serverObs
 	stopOnce          sync.Once
 	finishOnce        sync.Once
 	closed            chan struct{}
@@ -116,13 +156,13 @@ type Server struct {
 // target fails, already-opened targets are closed before returning.
 func NewServer(ctx context.Context, config ServerConfig, targets ...TargetConfig) (*Server, error) {
 	if config.Authenticator != nil && config.Authorizer != nil {
-		return nil, fmt.Errorf("pkcs11 proxy: configure only one of ServerConfig.Authenticator or ServerConfig.Authorizer")
+		return nil, errors.New("pkcs11 proxy: configure only one of ServerConfig.Authenticator or ServerConfig.Authorizer")
 	}
 	if config.Listener == nil && config.Address == "" {
-		return nil, fmt.Errorf("pkcs11 proxy: listener or address is required")
+		return nil, errors.New("pkcs11 proxy: listener or address is required")
 	}
 	if config.TLS == nil && !config.AllowInsecure {
-		return nil, fmt.Errorf("pkcs11 proxy: server TLS is required unless AllowInsecure is set")
+		return nil, errors.New("pkcs11 proxy: server TLS is required unless AllowInsecure is set")
 	}
 	if config.TLS != nil {
 		config.TLS = config.TLS.Clone()
@@ -139,6 +179,9 @@ func NewServer(ctx context.Context, config ServerConfig, targets ...TargetConfig
 	if config.MaxConnections <= 0 {
 		config.MaxConnections = 1024
 	}
+	if config.DrainTimeout <= 0 {
+		config.DrainTimeout = 5 * time.Minute
+	}
 	server := &Server{
 		config:            config,
 		targets:           make(map[string]*brokerTarget),
@@ -146,10 +189,15 @@ func NewServer(ctx context.Context, config ServerConfig, targets ...TargetConfig
 		activeConnections: make(map[net.Conn]struct{}),
 		closed:            make(chan struct{}),
 		finished:          make(chan struct{}),
+		obs:               serverObs{audit: config.Audit},
 	}
+	if _, err := rand.Read(server.instanceID[:]); err != nil {
+		return nil, fmt.Errorf("pkcs11 proxy: generate server ID: %w", err)
+	}
+	server.registerGauges()
 	for _, targetConfig := range targets {
 		if err := server.AddTarget(ctx, cloneTargetConfig(targetConfig)); err != nil {
-			_ = server.Close()
+			_ = server.Close(ctx)
 			return nil, err
 		}
 	}
@@ -173,24 +221,24 @@ func (server *Server) validateTargetSecurity(config TargetConfig) error {
 func (server *Server) AddTarget(ctx context.Context, config TargetConfig) error {
 	config = cloneTargetConfig(config)
 	if server == nil || server.closing.Load() {
-		return fmt.Errorf("pkcs11 proxy: server is closed")
+		return errors.New("pkcs11 proxy: server is closed")
 	}
 	if err := server.validateTargetSecurity(config); err != nil {
 		return err
 	}
-	target, err := newBrokerTarget(ctx, config)
+	target, err := newBrokerTarget(ctx, config, &server.obs)
 	if err != nil {
 		return fmt.Errorf("pkcs11 proxy: open target %q: %w", config.ID, err)
 	}
 	server.targetsMu.Lock()
 	if server.closing.Load() {
 		server.targetsMu.Unlock()
-		_ = target.close()
-		return fmt.Errorf("pkcs11 proxy: server is closed")
+		_ = target.close(ctx)
+		return errors.New("pkcs11 proxy: server is closed")
 	}
 	if _, exists := server.targets[target.id]; exists {
 		server.targetsMu.Unlock()
-		_ = target.close()
+		_ = target.close(ctx)
 		return fmt.Errorf("pkcs11 proxy: duplicate target %q", target.id)
 	}
 	server.targets[target.id] = target
@@ -205,33 +253,33 @@ func (server *Server) AddTarget(ctx context.Context, config TargetConfig) error 
 func (server *Server) ReplaceTarget(ctx context.Context, config TargetConfig) error {
 	config = cloneTargetConfig(config)
 	if server == nil || server.closing.Load() {
-		return fmt.Errorf("pkcs11 proxy: server is closed")
+		return errors.New("pkcs11 proxy: server is closed")
 	}
 	if err := server.validateTargetSecurity(config); err != nil {
 		return err
 	}
-	replacement, err := newBrokerTarget(ctx, config)
+	replacement, err := newBrokerTarget(ctx, config, &server.obs)
 	if err != nil {
 		return fmt.Errorf("pkcs11 proxy: open replacement target %q: %w", config.ID, err)
 	}
 	server.targetsMu.Lock()
 	if server.closing.Load() {
 		server.targetsMu.Unlock()
-		_ = replacement.close()
-		return fmt.Errorf("pkcs11 proxy: server is closed")
+		_ = replacement.close(ctx)
+		return errors.New("pkcs11 proxy: server is closed")
 	}
 	previous := server.targets[replacement.id]
 	server.targets[replacement.id] = replacement
 	server.targetsMu.Unlock()
 	if previous != nil {
-		return previous.close()
+		return previous.close(ctx)
 	}
 	return nil
 }
 
 // RemoveTarget unpublishes a route, then drains and closes its physical HSM
 // resources. New calls fail with target_not_found immediately after removal.
-func (server *Server) RemoveTarget(id string) error {
+func (server *Server) RemoveTarget(ctx context.Context, id string) error {
 	if server == nil {
 		return nil
 	}
@@ -242,7 +290,7 @@ func (server *Server) RemoveTarget(id string) error {
 	if target == nil {
 		return nil
 	}
-	return target.close()
+	return target.close(ctx)
 }
 
 // TargetIDs returns the currently published route IDs in stable order.
@@ -260,6 +308,42 @@ func (server *Server) TargetIDs() []string {
 	return ids
 }
 
+// RouteCatalog describes every published route in stable order. It is the
+// payload behind the server-scoped @routes request: clients use it to discover
+// which routes exist and which token each is bound to before choosing
+// Target.Route and Target.Revision.
+func (server *Server) RouteCatalog() []RouteInfo {
+	if server == nil {
+		return nil
+	}
+	server.targetsMu.RLock()
+	targets := make([]*brokerTarget, 0, len(server.targets))
+	for _, target := range server.targets {
+		targets = append(targets, target)
+	}
+	server.targetsMu.RUnlock()
+	sort.Slice(targets, func(i, j int) bool { return targets[i].id < targets[j].id })
+	routes := make([]RouteInfo, 0, len(targets))
+	for _, target := range targets {
+		routes = append(routes, target.routeInfo())
+	}
+	return routes
+}
+
+// routeCatalogResponse answers the server-scoped @routes method. It runs after
+// transport authentication but is not bound to any route or epoch, so a client
+// can discover the catalog before selecting one.
+func (server *Server) routeCatalogResponse() response {
+	resp := response{Version: protocolVersion}
+	encoded, err := encodeWireValue(routeCatalog{Routes: server.RouteCatalog()}, emptyCodecRegistry())
+	if err != nil {
+		resp.Error = encodeError(err)
+		return resp
+	}
+	resp.Results = []wireValue{encoded}
+	return resp
+}
+
 // TargetStats returns a route's current bounded-resource usage.
 func (server *Server) TargetStats(id string) (TargetStats, bool) {
 	if server == nil {
@@ -272,6 +356,162 @@ func (server *Server) TargetStats(id string) (TargetStats, bool) {
 		return TargetStats{}, false
 	}
 	return target.stats(), true
+}
+
+// InstanceID is the random identity generated for this proxy process. Clients
+// fence every established request against it; a restart always changes it.
+func (server *Server) InstanceID() [16]byte {
+	if server == nil {
+		return [16]byte{}
+	}
+	return server.instanceID
+}
+
+// State reports the server lifecycle state.
+func (server *Server) State() ServerState {
+	if server == nil {
+		return ServerDraining
+	}
+	return ServerState(server.state.Load())
+}
+
+// accepting reports whether new logical clients may establish on this process.
+// Draining or closing servers keep serving pinned clients but refuse new ones.
+func (server *Server) accepting() bool {
+	return server != nil && server.state.Load() == int32(ServerActive) && !server.closing.Load()
+}
+
+// Drain marks the process draining: new logical clients are refused at
+// establishment while every existing client keeps its pinned route until it
+// closes or idle-expires. It does not close the listener or in-flight work;
+// callers finish scale-down with WaitDrained followed by Shutdown or Close.
+func (server *Server) Drain(ctx context.Context) {
+	if server == nil {
+		return
+	}
+	if server.state.CompareAndSwap(int32(ServerActive), int32(ServerDraining)) {
+		server.obs.emitAudit(context.WithoutCancel(ctx), AuditEvent{Type: "drain"})
+	}
+}
+
+// Counters returns a snapshot of the process-local request counters backing
+// the exported §30 metrics, for status surfaces like the dev UI.
+func (server *Server) Counters() ServerCounters {
+	if server == nil {
+		return ServerCounters{}
+	}
+	return ServerCounters{
+		RequestsTotal:    server.obs.requestsTotal.Load(),
+		TransportErrors:  server.obs.transportErrors.Load(),
+		AuthFailures:     server.obs.authFailures.Load(),
+		FenceRejections:  server.obs.fenceRejections.Load(),
+		DrainRejections:  server.obs.drainRejections.Load(),
+		StaleGenerations: server.obs.staleGenerations.Load(),
+	}
+}
+
+// ClientInfos returns a secret-free snapshot of every established logical
+// client across all routes, sorted by target then age, for status surfaces
+// like the dev UI.
+func (server *Server) ClientInfos() []ClientInfo {
+	if server == nil {
+		return nil
+	}
+	server.targetsMu.RLock()
+	targets := make([]*brokerTarget, 0, len(server.targets))
+	for _, target := range server.targets {
+		targets = append(targets, target)
+	}
+	server.targetsMu.RUnlock()
+	var out []ClientInfo
+	for _, target := range targets {
+		out = append(out, target.clientInfos()...)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Target != out[j].Target {
+			return out[i].Target < out[j].Target
+		}
+		return out[i].Since.Before(out[j].Since)
+	})
+	return out
+}
+
+// MethodOutcomes returns the process-local request breakdown by route,
+// method, and outcome — the same dimensions the exported
+// pkcs11_proxy_requests_total metric carries.
+func (server *Server) MethodOutcomes() []MethodOutcome {
+	if server == nil {
+		return nil
+	}
+	return server.obs.methodOutcomeSnapshot()
+}
+
+// RecentRequests returns the newest entries of the bounded in-process request
+// feed, most recent first. n <= 0 means the whole buffer.
+func (server *Server) RecentRequests(n int) []RequestEvent {
+	if server == nil {
+		return nil
+	}
+	return server.obs.recentRequestSnapshot(n)
+}
+
+// RouteCapabilities returns the routable algorithm names and mechanism count
+// of the token behind one route — the managed client's capability snapshot,
+// refreshed as the token is rediscovered.
+func (server *Server) RouteCapabilities(id string) (algorithms []string, mechanisms int, ok bool) {
+	server.targetsMu.RLock()
+	target := server.targets[id]
+	server.targetsMu.RUnlock()
+	if server == nil || target == nil {
+		return nil, 0, false
+	}
+	algorithms, mechanisms = target.tokenCapabilities()
+	return algorithms, mechanisms, true
+}
+
+// LogicalClients returns the number of established logical PKCS #11 clients
+// retained across all routes. During draining it is the countdown to zero.
+func (server *Server) LogicalClients() int {
+	if server == nil {
+		return 0
+	}
+	server.targetsMu.RLock()
+	targets := make([]*brokerTarget, 0, len(server.targets))
+	for _, target := range server.targets {
+		targets = append(targets, target)
+	}
+	server.targetsMu.RUnlock()
+	total := 0
+	for _, target := range targets {
+		total += target.clientCount()
+	}
+	return total
+}
+
+// WaitDrained polls until no logical clients remain or ctx expires. It is the
+// graceful scale-down wait: after Drain, established clients finish naturally
+// and the caller proceeds to Shutdown once this returns.
+//
+//nolint:contextcheck // Nil callers intentionally fall back to a detached context.
+func (server *Server) WaitDrained(ctx context.Context) error {
+	if server == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if server.LogicalClients() == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // Addr returns the active listener address after Serve begins.
@@ -288,17 +528,21 @@ func (server *Server) Addr() net.Addr {
 	return listener.Addr()
 }
 
-// Serve accepts connections until ctx is canceled, Close is called, or the
-// listener returns a permanent error.
+// Serve accepts connections until Close or Shutdown is called, or the listener
+// returns a permanent error. Cancellation of ctx marks the server draining —
+// the listener stays open so already-pinned clients keep working — and the
+// caller is expected to WaitDrained and then Shutdown. That gives scale-down
+// the order: stop accepting new logical clients, let existing ones finish,
+// then stop the process.
 func (server *Server) Serve(ctx context.Context) error {
 	if server == nil {
-		return fmt.Errorf("pkcs11 proxy: nil server")
+		return errors.New("pkcs11 proxy: nil server")
 	}
 	if !server.serving.CompareAndSwap(false, true) {
-		return fmt.Errorf("pkcs11 proxy: Serve may be called only once")
+		return errors.New("pkcs11 proxy: Serve may be called only once")
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = context.Background() //nolint:contextcheck // Fallback for callers that pass no serving context.
 	}
 	listener := server.config.Listener
 	if listener == nil {
@@ -317,7 +561,7 @@ func (server *Server) Serve(ctx context.Context) error {
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = server.Shutdown(context.Background())
+			server.Drain(ctx)
 		case <-server.closed:
 		}
 	}()
@@ -378,7 +622,7 @@ func (server *Server) authenticateIdentity(ctx context.Context, identity Request
 		}
 		principal = strings.TrimSpace(principal)
 		if principal == "" {
-			return "", fmt.Errorf("authenticator returned an empty principal")
+			return "", errors.New("authenticator returned an empty principal")
 		}
 		return principal, nil
 	}
@@ -392,8 +636,9 @@ func (server *Server) authenticateIdentity(ctx context.Context, identity Request
 	return "anonymous", nil
 }
 
+//nolint:contextcheck // Nil callers intentionally fall back to a detached context.
 func (server *Server) handleConnection(parent context.Context, connection net.Conn) {
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -402,6 +647,8 @@ func (server *Server) handleConnection(parent context.Context, connection net.Co
 	identity := RequestIdentity{RemoteAddress: connection.RemoteAddr().String()}
 	if tlsConnection, ok := connection.(*tls.Conn); ok {
 		if err := tlsConnection.HandshakeContext(parent); err != nil {
+			server.obs.transportErrors.Add(1)
+			transportErrors.Add(parent, 1)
 			return
 		}
 		state := tlsConnection.ConnectionState()
@@ -411,6 +658,8 @@ func (server *Server) handleConnection(parent context.Context, connection net.Co
 	_ = connection.SetReadDeadline(time.Now().Add(server.config.ReadTimeout))
 	var req request
 	if err := readMessage(connection, &req, server.config.MaximumMessageSize); err != nil {
+		server.obs.transportErrors.Add(1)
+		transportErrors.Add(parent, 1)
 		return
 	}
 	defer func() {
@@ -450,13 +699,20 @@ func (server *Server) handleConnection(parent context.Context, connection net.Co
 	identity.ClientID = req.ClientID
 	defer wipe(identity.Auth)
 
+	spanCtx, span := startRequestSpan(ctx, server.instanceID, identity, req)
+	started := time.Now()
+
 	resp := response{Version: protocolVersion}
 	if req.Version != protocolVersion {
 		resp.Error = encodeError(&RemoteError{Code: "protocol_version", Message: fmt.Sprintf("got %d, want %d", req.Version, protocolVersion)})
 	} else if err := validateRequestEnvelope(req); err != nil {
 		resp.Error = encodeError(err)
+	} else if req.ServerID != ([16]byte{}) && req.ServerID != server.instanceID {
+		// A request pinned to a different proxy process must fail closed before
+		// it can create or touch logical-client state here.
+		resp.Error = encodeError(&RemoteError{Code: "wrong_server", Message: "request belongs to another proxy server instance"})
 	} else {
-		principal, err := server.authenticateIdentity(ctx, identity)
+		principal, err := server.authenticateIdentity(spanCtx, identity)
 		if err != nil {
 			resp.Error = encodeError(&RemoteError{Code: "unauthorized", Message: err.Error()})
 		} else {
@@ -464,25 +720,39 @@ func (server *Server) handleConnection(parent context.Context, connection net.Co
 		}
 	}
 	if resp.Error == nil {
-		server.targetsMu.RLock()
-		target := server.targets[req.Target]
-		server.targetsMu.RUnlock()
-		if target == nil {
-			resp.Error = encodeError(&RemoteError{Code: "target_not_found", Message: "target is not configured"})
-		} else if target.revision != req.Revision {
-			resp.Error = encodeError(&RemoteError{Code: "revision_mismatch", Message: "target revision does not match server configuration"})
+		if req.Method == methodListRoutes {
+			resp = server.routeCatalogResponse()
 		} else {
-			resp = target.handle(ctx, identity, req)
+			server.targetsMu.RLock()
+			target := server.targets[req.Target]
+			server.targetsMu.RUnlock()
+			switch {
+			case target == nil:
+				resp.Error = encodeError(&RemoteError{Code: "target_not_found", Message: "target is not configured"})
+			case target.revision != req.Revision:
+				resp.Error = encodeError(&RemoteError{Code: "revision_mismatch", Message: "target revision does not match server configuration"})
+			default:
+				resp = target.handle(spanCtx, identity, req, server)
+			}
 		}
 	}
+	code := outcomeCode(resp)
+	endRequestSpan(span, code)
+	server.obs.observeRequest(ctx, server.instanceID, identity, req, code, time.Since(started))
+	server.obs.observeRejection(ctx, server.instanceID, identity, req, code)
 	defer wipeResponse(&resp)
 	_ = connection.SetWriteDeadline(time.Now().Add(server.config.WriteTimeout))
-	_ = writeMessage(connection, resp, server.config.MaximumMessageSize)
+	if err := writeMessage(connection, resp, server.config.MaximumMessageSize); err != nil {
+		server.obs.transportErrors.Add(1)
+		transportErrors.Add(ctx, 1)
+	}
 }
 
 // Shutdown stops accepting new connections, allows active requests to finish,
 // and then closes all target clients and physical HSM sessions. If ctx expires,
 // active connections are force-closed before target shutdown proceeds.
+//
+//nolint:contextcheck // Nil callers intentionally fall back to a detached context.
 func (server *Server) Shutdown(ctx context.Context) error {
 	if server == nil {
 		return nil
@@ -496,20 +766,20 @@ func (server *Server) Shutdown(ctx context.Context) error {
 		server.forceCloseConnections()
 		server.handlers.Wait()
 	}
-	closeErr := server.finishTargets()
+	closeErr := server.finishTargets(ctx)
 	return errors.Join(waitErr, closeErr)
 }
 
 // Close force-closes active client connections, waits for their handlers to
 // exit, and then closes all target resources. Use Shutdown for graceful drain.
-func (server *Server) Close() error {
+func (server *Server) Close(ctx context.Context) error {
 	if server == nil {
 		return nil
 	}
 	server.stopAccepting()
 	server.forceCloseConnections()
 	server.handlers.Wait()
-	return server.finishTargets()
+	return server.finishTargets(ctx)
 }
 
 func (server *Server) stopAccepting() {
@@ -554,7 +824,7 @@ func (server *Server) waitHandlers(ctx context.Context) error {
 	}
 }
 
-func (server *Server) finishTargets() error {
+func (server *Server) finishTargets(ctx context.Context) error {
 	server.finishOnce.Do(func() {
 		server.targetsMu.Lock()
 		targets := server.targets
@@ -562,7 +832,7 @@ func (server *Server) finishTargets() error {
 		server.targetsMu.Unlock()
 		var errs []error
 		for _, target := range targets {
-			if err := target.close(); err != nil {
+			if err := target.close(ctx); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -574,14 +844,28 @@ func (server *Server) finishTargets() error {
 }
 
 func validateRequestEnvelope(req request) error {
-	if req.Target == "" || req.Revision == "" || req.Method == "" {
-		return &RemoteError{Code: "invalid_request", Message: "target, revision, and method are required"}
+	if req.Method == "" {
+		return &RemoteError{Code: "invalid_request", Message: "method is required"}
 	}
 	if req.ClientID == ([16]byte{}) || req.RequestID == ([16]byte{}) {
 		return &RemoteError{Code: "invalid_request", Message: "client ID and request ID must be nonzero"}
 	}
+	// @routes is server-scoped: it is answered before route selection and is
+	// not bound to a target name, revision, or epoch.
+	if req.Method == methodListRoutes {
+		return nil
+	}
+	if req.Target == "" || req.Revision == "" {
+		return &RemoteError{Code: "invalid_request", Message: "target and revision are required"}
+	}
 	if req.Method != methodDescribe && req.Epoch == ([16]byte{}) {
 		return &RemoteError{Code: "invalid_request", Message: "target epoch is required"}
+	}
+	// Established requests must carry the server identity they learned at
+	// describe time; @describe and @routes are probing methods and arrive with
+	// a zero ServerID.
+	if req.Method != methodDescribe && req.ServerID == ([16]byte{}) {
+		return &RemoteError{Code: "invalid_request", Message: "server ID is required"}
 	}
 	return nil
 }

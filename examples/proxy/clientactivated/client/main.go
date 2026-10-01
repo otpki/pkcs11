@@ -5,9 +5,11 @@ package main
 import (
 	"context"
 	"crypto"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	pkcs11 "github.com/otpki/pkcs11"
@@ -22,7 +24,7 @@ func main() {
 	target := proxy.Target{
 		ConfigID:          "client-owned-hsm-credential",
 		Revision:          env("PKCS11_PROXY_REVISION", "example-v1"),
-		Endpoint:          env("PKCS11_PROXY_ENDPOINT", "127.0.0.1:9443"),
+		Endpoints:         strings.Split(env("PKCS11_PROXY_ENDPOINTS", env("PKCS11_PROXY_ENDPOINT", "127.0.0.1:9443")), ","),
 		Route:             env("PKCS11_PROXY_ROUTE", "client-activated-utimaco"),
 		SecurityContextID: "example-workload-auth-v1",
 		AllowInsecure:     true, // Development only; use mTLS in production.
@@ -48,7 +50,7 @@ func main() {
 		PIN: auditedHSMCredential,
 	})
 	check(err)
-	defer func() { check(client.Close()) }()
+	defer func() { check(client.Close(ctx)) }()
 
 	// Activate obtains a fresh PIN and performs logical login. If the target is
 	// inactive, one authorized caller becomes the physical activation leader.
@@ -85,7 +87,7 @@ func auditedHSMCredential(_ context.Context, request pkcs11.PINRequest) (pkcs11.
 	log.Printf("HSM PIN approved purpose=%s token=%q attempt=%d", request.Purpose, request.Token.Label, request.Attempt)
 	pin := os.Getenv("PKCS11_PIN")
 	if pin == "" {
-		return nil, fmt.Errorf("PKCS11_PIN is required in the client process")
+		return nil, errors.New("PKCS11_PIN is required in the client process")
 	}
 	return pkcs11.NewSecret([]byte(pin)), nil
 }

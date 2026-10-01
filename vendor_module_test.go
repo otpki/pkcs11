@@ -29,39 +29,46 @@ func (m *testVendorModule) AdaptRoute(device Device, route Route) (Route, error)
 	}
 	return m.VendorBase.AdaptRoute(device, route)
 }
+
 func (m *testVendorModule) NormalizeMechanism(context VendorMechanismContext, mechanism *raw.Mechanism) (*raw.Mechanism, error) {
 	if m.normalizeMechanism != nil {
 		return m.normalizeMechanism(context, mechanism)
 	}
 	return m.VendorBase.NormalizeMechanism(context, mechanism)
 }
+
 func (m *testVendorModule) NormalizeTemplate(context VendorTemplateContext, attributes []*raw.Attribute) ([]*raw.Attribute, error) {
 	if m.normalizeTemplate != nil {
 		return m.normalizeTemplate(context, attributes)
 	}
 	return m.VendorBase.NormalizeTemplate(context, attributes)
 }
+
 func (m *testVendorModule) ClassifyError(context VendorErrorContext, err error) RecoveryAction {
 	if m.classifyError != nil {
 		return m.classifyError(context, err)
 	}
 	return m.VendorBase.ClassifyError(context, err)
 }
+
 func (m *testVendorModule) ObjectAttributes() []uint {
 	return append([]uint(nil), m.objectAttributes...)
 }
+
 func (m *testVendorModule) InferAlgorithm(metadata VendorObjectMetadata) (Algorithm, bool) {
 	if m.inferAlgorithm != nil {
 		return m.inferAlgorithm(metadata)
 	}
 	return m.VendorBase.InferAlgorithm(metadata)
 }
+
 func (m *testVendorModule) KeyPairModel(algorithm Algorithm, route Route) (VendorKeyPairModel, bool) {
 	if m.keyPairModel != nil {
 		return m.keyPairModel(algorithm, route)
 	}
 	return m.VendorBase.KeyPairModel(algorithm, route)
 }
+
 func (m *testVendorModule) LoadPublicKey(ctx context.Context, session VendorSession, object ObjectRef, algorithm Algorithm) (crypto.PublicKey, bool, error) {
 	if m.loadPublicKey != nil {
 		return m.loadPublicKey(ctx, session, object, algorithm)
@@ -80,7 +87,8 @@ func newTestVendor(id AdapterFamily, name string, priority int, match VendorMatc
 func deviceForVendor(t interface {
 	Helper()
 	Fatal(...any)
-}, module VendorModule, mechanisms map[raw.MechanismType]raw.MechanismInfo) Device {
+}, module VendorModule, mechanisms map[raw.MechanismType]raw.MechanismInfo,
+) Device {
 	t.Helper()
 	fp := Fingerprint{Token: raw.TokenInfo{Label: "test"}, Mechanisms: mechanisms}
 	selection, err := selectAdapter(fp, CompatibilityConfig{AdapterFamily: module.Definition().ID}, []VendorModule{module})

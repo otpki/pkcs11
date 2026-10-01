@@ -2,6 +2,7 @@ package pkcs11
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -112,14 +113,15 @@ func acquireModule(ctx context.Context, source ModuleSource) (*moduleRef, error)
 	module := &moduleRef{key: key, path: path, source: source, raw: rawModule, refs: 1}
 	module.generation.Store(1)
 	err = module.initialize(false, true)
-	if err == nil {
+	switch {
+	case err == nil:
 		module.initialized = true
 		module.managedInitialize = true
-	} else if raw.IsError(err, raw.CKR_CRYPTOKI_ALREADY_INITIALIZED) {
+	case raw.IsError(err, raw.CKR_CRYPTOKI_ALREADY_INITIALIZED):
 		// Another library user initialized the process-global module. We can use
 		// it, but must not later claim ownership by calling C_Finalize.
 		module.initialized = true
-	} else {
+	default:
 		rawModule.Destroy()
 		return nil, fmt.Errorf("pkcs11: initialize module %q: %w", path, err)
 	}
@@ -140,7 +142,7 @@ func (m *moduleRef) ensureInitialized(forceLegacy, allowFallback bool) error {
 	m.calls.Lock()
 	defer m.calls.Unlock()
 	if m.closed {
-		return fmt.Errorf("pkcs11: module is closed")
+		return errors.New("pkcs11: module is closed")
 	}
 	if m.initialized {
 		return nil
@@ -236,12 +238,12 @@ func releaseModule(module *moduleRef) error {
 // hold a lease for the complete operation.
 func (m *moduleRef) execute(ctx context.Context, plan behaviorPlan, fn func(raw.Module) error) error {
 	if m == nil || m.raw == nil {
-		return fmt.Errorf("pkcs11: module is closed")
+		return errors.New("pkcs11: module is closed")
 	}
 	m.calls.RLock()
 	defer m.calls.RUnlock()
 	if m.closed {
-		return fmt.Errorf("pkcs11: module is closed")
+		return errors.New("pkcs11: module is closed")
 	}
 	if m.forceSerialize || plan.module.serializeCalls {
 		m.serialized.Lock()
@@ -258,12 +260,12 @@ func (m *moduleRef) execute(ctx context.Context, plan behaviorPlan, fn func(raw.
 // caller must pair a successful acquisition with releaseLease.
 func (m *moduleRef) acquireLease() error {
 	if m == nil || m.raw == nil {
-		return fmt.Errorf("pkcs11: module is closed")
+		return errors.New("pkcs11: module is closed")
 	}
 	m.leases.RLock()
 	if m.closed {
 		m.leases.RUnlock()
-		return fmt.Errorf("pkcs11: module is closed")
+		return errors.New("pkcs11: module is closed")
 	}
 	return nil
 }
@@ -280,7 +282,7 @@ func (m *moduleRef) releaseLease() {
 // invalidated by bumping generation and are closed lazily.
 func (m *moduleRef) reinitialize(plan behaviorPlan) error {
 	if m == nil {
-		return fmt.Errorf("pkcs11: module is closed")
+		return errors.New("pkcs11: module is closed")
 	}
 	m.lifecycle.Lock()
 	defer m.lifecycle.Unlock()
@@ -289,7 +291,7 @@ func (m *moduleRef) reinitialize(plan behaviorPlan) error {
 	m.calls.Lock()
 	defer m.calls.Unlock()
 	if m.closed {
-		return fmt.Errorf("pkcs11: module is closed")
+		return errors.New("pkcs11: module is closed")
 	}
 	if m.forceSerialize || plan.module.serializeCalls {
 		m.serialized.Lock()

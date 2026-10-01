@@ -1,6 +1,6 @@
 package raw
 
-import "fmt"
+import "errors"
 
 // EncapsulateKey implements PKCS #11 3.2 C_EncapsulateKey and returns both
 // the KEM ciphertext and the newly-created shared-secret object.
@@ -191,7 +191,7 @@ func nativeFunctionName(arena *nativeArena, functionName string) (uintptr, error
 // buffer; Scalar, Object, and AdditionalObject map directly to CK_ASYNC_DATA.
 func (c *Ctx) AsyncComplete(session SessionHandle, functionName string, result *AsyncData) error {
 	if result == nil {
-		return fmt.Errorf("pkcs11: nil async result")
+		return errors.New("pkcs11: nil async result")
 	}
 	arena := &nativeArena{}
 	defer arena.close()

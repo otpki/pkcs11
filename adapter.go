@@ -86,13 +86,15 @@ type loginBehavior struct {
 	protectedPathOnEmptyPIN bool
 }
 
-type bufferBehavior struct{ rejectNullProbe bool }
-type mechanismBehavior struct{ allowUnadvertisedAliases bool }
-type recoveryBehavior struct{ networkBacked bool }
-type cipherBehavior struct {
-	gcmIVMode VendorGCMIVMode
-	gcmIVSize int
-}
+type (
+	bufferBehavior    struct{ rejectNullProbe bool }
+	mechanismBehavior struct{ allowUnadvertisedAliases bool }
+	recoveryBehavior  struct{ networkBacked bool }
+	cipherBehavior    struct {
+		gcmIVMode VendorGCMIVMode
+		gcmIVSize int
+	}
+)
 
 // behaviorPlan is private runtime state derived from standard flags and the
 // selected VendorModule. Applications cannot tune individual workarounds.

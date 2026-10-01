@@ -126,7 +126,8 @@ func TestAdaptRouteMLDSASignModes(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []byte{0xf2, 0x04, 0x00, 0x01, 0, 0, 0, 1}
-	if parameter := adapted.Mechanism.Parameter.([]byte); !bytes.Equal(parameter, want) {
+	parameter, ok := adapted.Mechanism.Parameter.([]byte)
+	if !ok || !bytes.Equal(parameter, want) {
 		t.Fatalf("prehash parameter = %x, want %x", parameter, want)
 	}
 

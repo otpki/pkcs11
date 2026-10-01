@@ -2,6 +2,7 @@ package utimaco
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 )
 
@@ -21,7 +22,7 @@ func (p GenerateParameters) MarshalBinary() ([]byte, error) {
 		return nil, err
 	}
 	if len(p.Attributes) > 0xffff {
-		return nil, fmt.Errorf("utimaco: generation attributes exceed 65535 bytes")
+		return nil, errors.New("utimaco: generation attributes exceed 65535 bytes")
 	}
 	out := make([]byte, 10+len(p.Attributes)+len(p.Seed))
 	binary.BigEndian.PutUint32(out[0:4], p.Flags)
@@ -64,7 +65,7 @@ func (p EncapsulationParameters) MarshalBinary() ([]byte, error) {
 		return nil, err
 	}
 	if len(p.PublicKey) > 0xffff {
-		return nil, fmt.Errorf("utimaco: public key exceeds 65535 bytes")
+		return nil, errors.New("utimaco: public key exceeds 65535 bytes")
 	}
 	out := make([]byte, 10+len(p.PublicKey))
 	binary.BigEndian.PutUint32(out[0:4], p.Flags)
@@ -90,7 +91,7 @@ func (p DecapsulationParameters) MarshalBinary() ([]byte, error) {
 		return nil, err
 	}
 	if len(p.PrivateKey) > 0xffff || len(p.Ciphertext) > 0xffff {
-		return nil, fmt.Errorf("utimaco: ML-KEM vector exceeds 65535 bytes")
+		return nil, errors.New("utimaco: ML-KEM vector exceeds 65535 bytes")
 	}
 	out := make([]byte, 12+len(p.PrivateKey)+len(p.Ciphertext))
 	binary.BigEndian.PutUint32(out[0:4], p.Flags)
@@ -115,7 +116,7 @@ type KeyWrapParameters struct {
 
 // MarshalBinary encodes the wrap/unwrap parameter block.
 func (p KeyWrapParameters) MarshalBinary() ([]byte, error) {
-	return SignatureParameters{Flags: p.Flags, Set: p.Set}.MarshalBinary()
+	return SignatureParameters(p).MarshalBinary()
 }
 
 func validateParameterSet(set ParameterSet) error {

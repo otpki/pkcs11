@@ -115,33 +115,21 @@ func TestRequestFingerprintDoesNotRetainCredentialValues(t *testing.T) {
 		{Kind: valueBytes, Bytes: []byte("different-pin")},
 	}
 
-	firstFingerprint, err := requestFingerprint(first)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondFingerprint, err := requestFingerprint(second)
-	if err != nil {
-		t.Fatal(err)
-	}
+	firstFingerprint := requestFingerprint(first)
+	secondFingerprint := requestFingerprint(second)
 	if firstFingerprint != secondFingerprint {
 		t.Fatal("request fingerprint changed with authentication or PIN values")
 	}
 
 	second.Method = "SetPIN"
-	differentMethod, err := requestFingerprint(second)
-	if err != nil {
-		t.Fatal(err)
-	}
+	differentMethod := requestFingerprint(second)
 	if firstFingerprint == differentMethod {
 		t.Fatal("request fingerprint did not distinguish a different operation")
 	}
 
 	second.Method = "Login"
 	second.Arguments[2] = wireValue{Kind: valueString, String: "different-shape"}
-	differentShape, err := requestFingerprint(second)
-	if err != nil {
-		t.Fatal(err)
-	}
+	differentShape := requestFingerprint(second)
 	if firstFingerprint == differentShape {
 		t.Fatal("request fingerprint did not distinguish a different argument schema")
 	}
@@ -292,7 +280,7 @@ func TestBrokerRejectsPINOnNestedManagedClientConfig(t *testing.T) {
 			Mode:         PhysicalLoginClientActivated,
 			Authenticate: func(context.Context, LoginAttempt) error { return nil },
 		},
-	})
+	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "TargetConfig.Client.PIN") {
 		t.Fatalf("nested client PIN validation = %v, want explicit rejection", err)
 	}

@@ -10,7 +10,7 @@ func openNativeContext(string, OpenConfig, NativeABI) (nativeContext, InterfaceI
 	return nativeContext{}, InterfaceInfo{}, ErrNativeUnavailable
 }
 
-func (nativeContext) valid() bool                      { return false }
-func (*nativeContext) close() error                    { return nil }
-func (nativeContext) call(functionID, ...uintptr) uint { return CKR_FUNCTION_NOT_SUPPORTED }
-func NativeAvailable() bool                            { return false }
+func (*nativeContext) valid() bool                      { return false }
+func (*nativeContext) close() error                     { return nil }
+func (*nativeContext) call(functionID, ...uintptr) uint { return CKR_FUNCTION_NOT_SUPPORTED }
+func NativeAvailable() bool                             { return false }

@@ -2,6 +2,7 @@ package pkcs11
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -113,7 +114,7 @@ func (source LocalModuleSource) String() string {
 
 func canonicalLocalModulePath(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
-		return "", fmt.Errorf("pkcs11: module path is required")
+		return "", errors.New("pkcs11: module path is required")
 	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
@@ -131,10 +132,10 @@ func canonicalLocalModulePath(path string) (string, error) {
 
 func validateModuleSource(source ModuleSource) error {
 	if source == nil {
-		return fmt.Errorf("pkcs11: module source is required; use LocalModule(path), OpenAuto, or OpenDetected")
+		return errors.New("pkcs11: module source is required; use LocalModule(path), OpenAuto, or OpenDetected")
 	}
 	if strings.TrimSpace(source.RegistryKey()) == "" {
-		return fmt.Errorf("pkcs11: module source returned an empty registry key")
+		return errors.New("pkcs11: module source returned an empty registry key")
 	}
 	return nil
 }

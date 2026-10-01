@@ -3,7 +3,6 @@ package pkcs11
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +30,8 @@ type RawSessionLease struct {
 // AcquireRawSession obtains an exclusive managed session without wrapping it in
 // an automatic retry loop. Infrastructure retaining a lease across calls must
 // decide explicitly whether an interrupted stateful operation can be retried.
+//
+//nolint:contextcheck // Nil callers intentionally fall back to a detached context.
 func (c *Client) AcquireRawSession(ctx context.Context, options RawSessionOptions) (*RawSessionLease, error) {
 	if c == nil || c.closed.Load() {
 		return nil, errors.New("pkcs11: client is closed")
@@ -62,7 +63,7 @@ func (lease *RawSessionLease) Call(ctx context.Context, operation string, fn fun
 		return errors.New("pkcs11: raw session lease is closed")
 	}
 	if fn == nil {
-		return fmt.Errorf("pkcs11: nil raw session lease callback")
+		return errors.New("pkcs11: nil raw session lease callback")
 	}
 	lease.mu.Lock()
 	defer lease.mu.Unlock()
@@ -72,7 +73,7 @@ func (lease *RawSessionLease) Call(ctx context.Context, operation string, fn fun
 	if operation == "" {
 		operation = lease.lease.operation
 	}
-	return lease.lease.callContext(ctx, operation, func(module raw.Module) error {
+	return lease.lease.call(ctx, operation, func(module raw.Module) error {
 		return fn(module, lease.lease.handle)
 	})
 }
@@ -81,15 +82,17 @@ func (lease *RawSessionLease) Call(ctx context.Context, operation string, fn fun
 // exact healthy native session. identity must change whenever the physical
 // credential, user type, username, target generation, or authorization domain
 // changes. The callback runs under the lease's serialization lock.
+//
+//nolint:contextcheck // Nil callers intentionally fall back to the lease context.
 func (lease *RawSessionLease) EnsureAuthentication(ctx context.Context, identity string, fn func(raw.Module, raw.SessionHandle) error) error {
 	if lease == nil || lease.lease == nil || lease.closed.Load() {
 		return errors.New("pkcs11: raw session lease is closed")
 	}
 	if identity == "" {
-		return fmt.Errorf("pkcs11: authentication identity is required")
+		return errors.New("pkcs11: authentication identity is required")
 	}
 	if fn == nil {
-		return fmt.Errorf("pkcs11: nil authentication callback")
+		return errors.New("pkcs11: nil authentication callback")
 	}
 	lease.mu.Lock()
 	defer lease.mu.Unlock()
@@ -102,7 +105,7 @@ func (lease *RawSessionLease) EnsureAuthentication(ctx context.Context, identity
 	if ctx == nil {
 		ctx = lease.lease.Context()
 	}
-	err := lease.lease.callContext(ctx, "raw-session-authenticate", func(module raw.Module) error {
+	err := lease.lease.call(ctx, "raw-session-authenticate", func(module raw.Module) error {
 		return fn(module, lease.lease.handle)
 	})
 	if err != nil {
@@ -126,6 +129,8 @@ func (lease *RawSessionLease) InvalidateAuthentication() {
 
 // ContextLogin performs a context-specific login on this exact retained
 // physical session, as required by CKA_ALWAYS_AUTHENTICATE keys.
+//
+//nolint:contextcheck // Nil callers intentionally fall back to the lease context.
 func (lease *RawSessionLease) ContextLogin(ctx context.Context) error {
 	if lease == nil || lease.lease == nil || lease.closed.Load() {
 		return errors.New("pkcs11: raw session lease is closed")
@@ -160,7 +165,7 @@ func (lease *RawSessionLease) MarkBroken() {
 }
 
 // Close releases the retained session. It is safe to call repeatedly.
-func (lease *RawSessionLease) Close() error {
+func (lease *RawSessionLease) Close(ctx context.Context) error {
 	if lease == nil {
 		return nil
 	}
@@ -169,7 +174,7 @@ func (lease *RawSessionLease) Close() error {
 		defer lease.mu.Unlock()
 		lease.closed.Store(true)
 		if lease.lease != nil {
-			lease.closeErr = lease.lease.Close()
+			lease.closeErr = lease.lease.Close(ctx)
 		}
 	})
 	return lease.closeErr

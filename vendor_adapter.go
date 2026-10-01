@@ -28,9 +28,9 @@ func cloneMechanismParameter(parameter any) any {
 		if value == nil {
 			return (*raw.OAEPParams)(nil)
 		}
-		copy := *value
-		copy.SourceData = append([]byte(nil), value.SourceData...)
-		return &copy
+		copied := *value
+		copied.SourceData = append([]byte(nil), value.SourceData...)
+		return &copied
 	case raw.GCMParams:
 		value.IV = append([]byte(nil), value.IV...)
 		value.AAD = append([]byte(nil), value.AAD...)
@@ -39,10 +39,10 @@ func cloneMechanismParameter(parameter any) any {
 		if value == nil {
 			return (*raw.GCMParams)(nil)
 		}
-		copy := *value
-		copy.IV = append([]byte(nil), value.IV...)
-		copy.AAD = append([]byte(nil), value.AAD...)
-		return &copy
+		copied := *value
+		copied.IV = append([]byte(nil), value.IV...)
+		copied.AAD = append([]byte(nil), value.AAD...)
+		return &copied
 	case raw.ECDH1DeriveParams:
 		value.SharedData = append([]byte(nil), value.SharedData...)
 		value.PublicData = append([]byte(nil), value.PublicData...)
@@ -51,10 +51,10 @@ func cloneMechanismParameter(parameter any) any {
 		if value == nil {
 			return (*raw.ECDH1DeriveParams)(nil)
 		}
-		copy := *value
-		copy.SharedData = append([]byte(nil), value.SharedData...)
-		copy.PublicData = append([]byte(nil), value.PublicData...)
-		return &copy
+		copied := *value
+		copied.SharedData = append([]byte(nil), value.SharedData...)
+		copied.PublicData = append([]byte(nil), value.PublicData...)
+		return &copied
 	case raw.EdDSAParams:
 		value.Context = append([]byte(nil), value.Context...)
 		return value
@@ -62,9 +62,9 @@ func cloneMechanismParameter(parameter any) any {
 		if value == nil {
 			return (*raw.EdDSAParams)(nil)
 		}
-		copy := *value
-		copy.Context = append([]byte(nil), value.Context...)
-		return &copy
+		copied := *value
+		copied.Context = append([]byte(nil), value.Context...)
+		return &copied
 	case raw.SignAdditionalContext:
 		value.Context = append([]byte(nil), value.Context...)
 		return value
@@ -72,9 +72,9 @@ func cloneMechanismParameter(parameter any) any {
 		if value == nil {
 			return (*raw.SignAdditionalContext)(nil)
 		}
-		copy := *value
-		copy.Context = append([]byte(nil), value.Context...)
-		return &copy
+		copied := *value
+		copied.Context = append([]byte(nil), value.Context...)
+		return &copied
 	case raw.HashSignAdditionalContext:
 		value.Context = append([]byte(nil), value.Context...)
 		return value
@@ -82,9 +82,9 @@ func cloneMechanismParameter(parameter any) any {
 		if value == nil {
 			return (*raw.HashSignAdditionalContext)(nil)
 		}
-		copy := *value
-		copy.Context = append([]byte(nil), value.Context...)
-		return &copy
+		copied := *value
+		copied.Context = append([]byte(nil), value.Context...)
+		return &copied
 	default:
 		return parameter
 	}

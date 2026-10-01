@@ -16,9 +16,11 @@ package main
 import (
 	"context"
 	"crypto"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	pkcs11 "github.com/otpki/pkcs11"
@@ -33,7 +35,7 @@ func main() {
 	target := proxy.Target{
 		ConfigID:          "pinauth-example",
 		Revision:          env("PKCS11_PROXY_REVISION", "v1"),
-		Endpoint:          env("PKCS11_PROXY_ENDPOINT", "127.0.0.1:9443"),
+		Endpoints:         strings.Split(env("PKCS11_PROXY_ENDPOINTS", env("PKCS11_PROXY_ENDPOINT", "127.0.0.1:9443")), ","),
 		Route:             env("PKCS11_PROXY_ROUTE", "hsm"),
 		SecurityContextID: "pinauth-example-v1",
 		AllowInsecure:     true, // Development only; configure TLS for production.
@@ -48,7 +50,7 @@ func main() {
 		Auth: func(context.Context) ([]byte, error) {
 			token := os.Getenv("PKCS11_PROXY_AUTH_TOKEN")
 			if token == "" {
-				return nil, fmt.Errorf("PKCS11_PROXY_AUTH_TOKEN is required")
+				return nil, errors.New("PKCS11_PROXY_AUTH_TOKEN is required")
 			}
 			return []byte(token), nil
 		},
@@ -70,7 +72,7 @@ func main() {
 		PIN: hsmPIN,
 	})
 	check(err)
-	defer func() { check(client.Close()) }()
+	defer func() { check(client.Close(ctx)) }()
 
 	// Activate performs the logical login. If the target is inactive this
 	// caller may become the activation leader whose PIN reaches the HSM;
@@ -88,7 +90,7 @@ func main() {
 func hsmPIN(context.Context, pkcs11.PINRequest) (pkcs11.Secret, error) {
 	pin := os.Getenv("PKCS11_PIN")
 	if pin == "" {
-		return pkcs11.Secret{}, fmt.Errorf("PKCS11_PIN is required")
+		return pkcs11.Secret{}, errors.New("PKCS11_PIN is required")
 	}
 	return pkcs11.NewSecret([]byte(pin)), nil
 }

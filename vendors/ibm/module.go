@@ -3,6 +3,7 @@
 package ibm
 
 import (
+	"errors"
 	"fmt"
 
 	pkcs11 "github.com/otpki/pkcs11"
@@ -77,7 +78,7 @@ type MLKEMParams struct {
 // MarshalPKCS11Native implements raw.NativeParameterMarshaler.
 func (p *MLKEMParams) MarshalPKCS11Native(abi raw.NativeABI) (raw.NativeParameterLayout, error) {
 	if p == nil {
-		return raw.NativeParameterLayout{}, fmt.Errorf("ibm: nil ML-KEM parameters")
+		return raw.NativeParameterLayout{}, errors.New("ibm: nil ML-KEM parameters")
 	}
 	if p.Mode != MLKEMEncapsulate && p.Mode != MLKEMDecapsulate {
 		return raw.NativeParameterLayout{}, fmt.Errorf("ibm: invalid ML-KEM mode %d", p.Mode)

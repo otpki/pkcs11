@@ -3,6 +3,7 @@
 package googlekms
 
 import (
+	"errors"
 	"fmt"
 
 	pkcs11 "github.com/otpki/pkcs11"
@@ -77,7 +78,7 @@ func (*Module) Definition() pkcs11.VendorDefinition {
 // NormalizeMechanism translates standard AES-GCM to Google's generated-IV mechanism.
 func (*Module) NormalizeMechanism(context pkcs11.VendorMechanismContext, mechanism *raw.Mechanism) (*raw.Mechanism, error) {
 	if mechanism == nil {
-		return nil, fmt.Errorf("googlekms: nil mechanism")
+		return nil, errors.New("googlekms: nil mechanism")
 	}
 	result := &raw.Mechanism{Mechanism: mechanism.Mechanism, Parameter: mechanism.Parameter}
 	if result.Mechanism != raw.CKM_AES_GCM || !context.Device.Capabilities.HasMechanism(MechanismAESGCM) {
@@ -89,14 +90,14 @@ func (*Module) NormalizeMechanism(context pkcs11.VendorMechanismContext, mechani
 	case nil:
 		params = &raw.GCMParams{}
 	case raw.GCMParams:
-		copy := value
-		params = &copy
+		copied := value
+		params = &copied
 	case *raw.GCMParams:
 		if value != nil {
-			copy := *value
-			copy.IV = append([]byte(nil), value.IV...)
-			copy.AAD = append([]byte(nil), value.AAD...)
-			params = &copy
+			copied := *value
+			copied.IV = append([]byte(nil), value.IV...)
+			copied.AAD = append([]byte(nil), value.AAD...)
+			params = &copied
 		}
 	default:
 		return nil, fmt.Errorf("googlekms: AES-GCM requires raw.GCMParams, got %T", result.Parameter)
@@ -108,7 +109,7 @@ func (*Module) NormalizeMechanism(context pkcs11.VendorMechanismContext, mechani
 		params.IV = make([]byte, 12)
 	}
 	if len(params.IV) != 12 {
-		return nil, fmt.Errorf("googlekms: generated-IV AES-GCM requires a 12-byte IV buffer")
+		return nil, errors.New("googlekms: generated-IV AES-GCM requires a 12-byte IV buffer")
 	}
 	params.IVBits = 96
 	if params.TagBits == 0 {
@@ -123,7 +124,7 @@ func (*Module) NormalizeTemplate(context pkcs11.VendorTemplateContext, attribute
 	result := pkcs11.CloneAttributes(attributes)
 	class, _ := pkcs11.AttributeULong(result, raw.CKA_CLASS)
 	if class == raw.CKO_CERTIFICATE {
-		return nil, fmt.Errorf("googlekms: writable certificate objects are not supported")
+		return nil, errors.New("googlekms: writable certificate objects are not supported")
 	}
 	if class != raw.CKO_PUBLIC_KEY {
 		return result, nil

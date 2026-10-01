@@ -1,6 +1,9 @@
 package raw
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // This file is the single ownership and layout boundary between ordinary Go
 // values and the native PKCS #11 ABI. Both transports construct the same
@@ -156,7 +159,7 @@ func (abi NativeABI) unavailableInformation() uint {
 // template.
 func (t *nativeTemplate) allocateGetValues(attributes []*Attribute) error {
 	if t == nil {
-		return fmt.Errorf("pkcs11: nil attribute template")
+		return errors.New("pkcs11: nil attribute template")
 	}
 	layout := nativeAttributeLayout(t.abi)
 	childIndex := 0
@@ -255,7 +258,7 @@ func (m *nativeMechanism) free() {
 
 func marshalMechanism(mechanism *Mechanism) (*nativeMechanism, error) {
 	if mechanism == nil {
-		return nil, fmt.Errorf("pkcs11: nil mechanism")
+		return nil, errors.New("pkcs11: nil mechanism")
 	}
 	abi := HostNativeABI()
 	arena := &nativeArena{}

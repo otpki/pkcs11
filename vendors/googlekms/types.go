@@ -1,7 +1,7 @@
 package googlekms
 
 import (
-	"fmt"
+	"errors"
 
 	"github.com/otpki/pkcs11/raw"
 )
@@ -41,7 +41,7 @@ type GenerateOptions struct {
 // Attributes converts the options to a caller-owned PKCS #11 template fragment.
 func (o GenerateOptions) Attributes() ([]*raw.Attribute, error) {
 	if o.Algorithm == 0 {
-		return nil, fmt.Errorf("googlekms: algorithm is required")
+		return nil, errors.New("googlekms: algorithm is required")
 	}
 	result := []*raw.Attribute{raw.NewAttribute(AttributeAlgorithm, uint(o.Algorithm))}
 	if o.ProtectionLevel != 0 {

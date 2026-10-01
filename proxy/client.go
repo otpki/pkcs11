@@ -1,15 +1,18 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +20,9 @@ import (
 
 	pkcs11 "github.com/otpki/pkcs11"
 	"github.com/otpki/pkcs11/raw"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // AuthProvider returns per-request proxy authentication material. Transport
@@ -39,13 +45,19 @@ type Target struct {
 	// The broker rejects a request when its revision no longer matches the
 	// published route, preventing stale configuration from silently continuing.
 	Revision string
-	// Endpoint is the TCP host:port of the proxy broker.
-	Endpoint string
+	// Endpoints are the TCP host:port addresses of independent proxy replicas
+	// serving the same routes. When more than one is configured, each new
+	// logical client is deterministically assigned to one endpoint by
+	// rendezvous hashing and stays pinned to that process for its entire
+	// lifetime; a process failure is reported as ErrTargetLost rather than
+	// migrating live PKCS #11 state.
+	Endpoints []string
 	// Route selects one broker-side TargetConfig. It is intentionally separate
-	// from Endpoint so one broker can expose multiple HSMs or partitions.
+	// from Endpoints so one broker can expose multiple HSMs or partitions.
 	Route string
 	// ServerName overrides TLS certificate name verification. When empty, the
-	// host portion of Endpoint is used.
+	// host portion of the dialed endpoint is used. Set it explicitly when
+	// Endpoints are IPs that share one TLS identity.
 	ServerName string
 	// SecurityContextID is an application-defined, non-secret identity for the
 	// TLS roots, client certificate, workload identity, AuthProvider, and custom
@@ -94,22 +106,27 @@ type Target struct {
 
 func (target Target) validate() error {
 	if strings.TrimSpace(target.ConfigID) == "" {
-		return fmt.Errorf("pkcs11 proxy: ConfigID is required")
+		return errors.New("pkcs11 proxy: ConfigID is required")
 	}
 	if strings.TrimSpace(target.Revision) == "" {
-		return fmt.Errorf("pkcs11 proxy: Revision is required")
+		return errors.New("pkcs11 proxy: Revision is required")
 	}
-	if strings.TrimSpace(target.Endpoint) == "" {
-		return fmt.Errorf("pkcs11 proxy: Endpoint is required")
+	if len(target.Endpoints) == 0 {
+		return errors.New("pkcs11 proxy: at least one endpoint is required")
+	}
+	for _, endpoint := range target.Endpoints {
+		if strings.TrimSpace(endpoint) == "" {
+			return errors.New("pkcs11 proxy: endpoints must not be empty")
+		}
 	}
 	if strings.TrimSpace(target.Route) == "" {
-		return fmt.Errorf("pkcs11 proxy: Route is required")
+		return errors.New("pkcs11 proxy: Route is required")
 	}
 	if target.TLS == nil && !target.AllowInsecure {
-		return fmt.Errorf("pkcs11 proxy: TLS is required unless AllowInsecure is set")
+		return errors.New("pkcs11 proxy: TLS is required unless AllowInsecure is set")
 	}
 	if (target.TLS != nil || target.Auth != nil || target.Dialer != nil) && strings.TrimSpace(target.SecurityContextID) == "" {
-		return fmt.Errorf("pkcs11 proxy: SecurityContextID is required when TLS, Auth, or a custom Dialer is configured")
+		return errors.New("pkcs11 proxy: SecurityContextID is required when TLS, Auth, or a custom Dialer is configured")
 	}
 	return nil
 }
@@ -136,14 +153,28 @@ func (target Target) normalized() Target {
 	if target.RetryMaximumBackoff < target.RetryInitialBackoff {
 		target.RetryMaximumBackoff = target.RetryInitialBackoff
 	}
+	endpoints := make([]string, 0, len(target.Endpoints))
+	seen := make(map[string]struct{}, len(target.Endpoints))
+	for _, endpoint := range target.Endpoints {
+		endpoint = strings.TrimSpace(endpoint)
+		if endpoint == "" {
+			continue
+		}
+		if _, dup := seen[endpoint]; dup {
+			continue
+		}
+		seen[endpoint] = struct{}{}
+		endpoints = append(endpoints, endpoint)
+	}
+	target.Endpoints = endpoints
 	target.Vendors = append([]pkcs11.VendorModule(nil), target.Vendors...)
 	target.Codecs = append([]ParameterCodec(nil), target.Codecs...)
 	if target.TLS != nil {
 		target.TLS = target.TLS.Clone()
 	}
 	if target.Dialer != nil {
-		copy := *target.Dialer
-		target.Dialer = &copy
+		dialer := *target.Dialer
+		target.Dialer = &dialer
 	}
 	return target
 }
@@ -185,7 +216,7 @@ func (source Source) RegistryKey() string {
 	parts := []string{
 		target.ConfigID,
 		target.Revision,
-		target.Endpoint,
+		strings.Join(target.Endpoints, "\x1f"),
 		target.Route,
 		target.ServerName,
 		target.SecurityContextID,
@@ -212,7 +243,7 @@ func (source Source) RegistryKey() string {
 }
 
 func (target Target) modulePath() string {
-	return fmt.Sprintf("p11proxy://%s/%s@%s", target.Endpoint, target.Route, target.Revision)
+	return fmt.Sprintf("p11proxy://%s/%s@%s", strings.Join(target.Endpoints, ","), target.Route, target.Revision)
 }
 
 type activeParameterKey struct {
@@ -248,18 +279,108 @@ func (state *clientState) setEpoch(epoch [16]byte) {
 }
 
 // Client implements raw.Module over a fresh TCP/TLS connection for every call.
+// Once established it is pinned to exactly one proxy process: endpoint and
+// serverID are immutable after the describe handshake, and a pinned process
+// that is lost can never be substituted by another replica.
 type Client struct {
 	target   Target
 	registry *CodecRegistry
 	id       [16]byte
+	endpoint string
+	serverID [16]byte
 	path     string
 	selected raw.InterfaceInfo
-	ctx      context.Context
-	state    *clientState
+	//nolint:containedctx // The client's lifetime context drives pinned-endpoint calls.
+	ctx   context.Context
+	state *clientState
 }
 
-// Open performs a describe handshake and creates a logical remote module. It
-// does not retain a socket; every subsequent method call dials independently.
+// rankEndpoints orders endpoints by rendezvous (highest-random-weight) score
+// for one logical client. Different client IDs produce different orderings, so
+// new clients distribute deterministically across the configured proxy
+// replicas without any shared state between them.
+func rankEndpoints(clientID [16]byte, endpoints []string) []string {
+	type rankedEndpoint struct {
+		endpoint string
+		score    [32]byte
+	}
+	ranked := make([]rankedEndpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		digest := sha256.New()
+		_, _ = digest.Write(clientID[:])
+		_, _ = digest.Write([]byte{0})
+		_, _ = digest.Write([]byte(endpoint))
+		ranked = append(ranked, rankedEndpoint{endpoint: endpoint, score: [32]byte(digest.Sum(nil))})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		return bytes.Compare(ranked[i].score[:], ranked[j].score[:]) > 0
+	})
+	ordered := make([]string, len(ranked))
+	for index := range ranked {
+		ordered[index] = ranked[index].endpoint
+	}
+	return ordered
+}
+
+// transportError marks a failure that occurred before a complete response was
+// received from an endpoint. During establishment it permits trying the next
+// ranked endpoint; after establishment it contributes to ErrTargetLost once
+// the retry policy is exhausted.
+type transportError struct {
+	op  string
+	err error
+}
+
+func (e *transportError) Error() string { return e.err.Error() }
+func (e *transportError) Unwrap() error { return e.err }
+
+func isEndpointUnavailable(err error) bool {
+	var transport *transportError
+	return errors.As(err, &transport)
+}
+
+// ListRoutes returns the published route catalog of the first reachable proxy
+// endpoint: which routes exist and which token each is bound to. It is
+// server-scoped — Endpoints, TLS, timeouts, and Auth are honored, but Route,
+// Revision, ConfigID, and SecurityContextID are not consulted because no route
+// has been selected yet. Replicas serving the same deployment expose the same
+// catalog, so transport failures fall through to the next endpoint.
+// Use it to discover Route and Revision values before calling Open.
+func ListRoutes(ctx context.Context, target Target) ([]RouteInfo, error) {
+	target = target.normalized()
+	if len(target.Endpoints) == 0 {
+		return nil, errors.New("pkcs11 proxy: at least one endpoint is required")
+	}
+	if target.TLS == nil && !target.AllowInsecure {
+		return nil, errors.New("pkcs11 proxy: TLS is required unless AllowInsecure is set")
+	}
+	client := &Client{
+		target: target, registry: emptyCodecRegistry(), ctx: context.Background(),
+		state: &clientState{active: make(map[activeParameterKey][]*raw.Mechanism)},
+	}
+	if _, err := rand.Read(client.id[:]); err != nil {
+		return nil, fmt.Errorf("pkcs11 proxy: generate client ID: %w", err)
+	}
+	var lastErr error
+	for _, endpoint := range rankEndpoints(client.id, target.Endpoints) {
+		var catalog routeCatalog
+		if err := client.invokeEndpoint(ctx, endpoint, methodListRoutes, nil, &catalog); err != nil {
+			if !isEndpointUnavailable(err) {
+				return nil, err
+			}
+			lastErr = err
+			continue
+		}
+		return catalog.Routes, nil
+	}
+	return nil, fmt.Errorf("pkcs11 proxy: no endpoints available: %w", lastErr)
+}
+
+// Open probes the configured endpoints in rendezvous order and creates a
+// logical remote module on the first replica that accepts new clients. The
+// selected endpoint, server ID, and target epoch are pinned for the lifetime
+// of the returned Client; they are never recomputed. It does not retain a
+// socket; every subsequent method call dials independently.
 func Open(ctx context.Context, target Target) (*Client, error) {
 	target = target.normalized()
 	if err := target.validate(); err != nil {
@@ -273,19 +394,54 @@ func Open(ctx context.Context, target Target) (*Client, error) {
 	if _, err := rand.Read(client.id[:]); err != nil {
 		return nil, fmt.Errorf("pkcs11 proxy: generate client ID: %w", err)
 	}
-	var description describeResult
-	if err := client.invokeContext(ctx, methodDescribe, nil, &description); err != nil {
-		return nil, err
+	var lastErr error
+	for _, endpoint := range rankEndpoints(client.id, target.Endpoints) {
+		var description describeResult
+		if err := client.invokeEndpoint(ctx, endpoint, methodDescribe, nil, &description); err != nil {
+			// Only transport-level unavailability advances to the next replica;
+			// authentication, protocol, and codec failures are returned as-is.
+			if !isEndpointUnavailable(err) {
+				return nil, err
+			}
+			lastErr = err
+			continue
+		}
+		if !description.AcceptingNewClients {
+			lastErr = fmt.Errorf("pkcs11 proxy: %s is draining and not accepting new clients", endpoint)
+			continue
+		}
+		if !codecDescriptorsEqual(registry.Descriptors(), description.Codecs) {
+			return nil, fmt.Errorf("pkcs11 proxy: parameter codec mismatch: client=%v server=%v", registry.Descriptors(), description.Codecs)
+		}
+		client.endpoint = endpoint
+		client.serverID = description.ServerID
+		client.selected = description.Interface
+		client.state.setEpoch(description.Epoch)
+		if description.Path != "" {
+			client.path = description.Path
+		}
+		return client, nil
 	}
-	if !codecDescriptorsEqual(registry.Descriptors(), description.Codecs) {
-		return nil, fmt.Errorf("pkcs11 proxy: parameter codec mismatch: client=%v server=%v", registry.Descriptors(), description.Codecs)
+	return nil, fmt.Errorf("pkcs11 proxy: no endpoints available: %w", lastErr)
+}
+
+// Endpoint returns the proxy address this logical client is pinned to. It is
+// fixed at Open and never changes: failures surface as ErrTargetLost rather
+// than migrating state between replicas.
+func (client *Client) Endpoint() string {
+	if client == nil {
+		return ""
 	}
-	client.selected = description.Interface
-	client.state.setEpoch(description.Epoch)
-	if description.Path != "" {
-		client.path = description.Path
+	return client.endpoint
+}
+
+// ServerID returns the identity of the proxy process this logical client is
+// bound to, learned during the describe handshake.
+func (client *Client) ServerID() [16]byte {
+	if client == nil {
+		return [16]byte{}
 	}
-	return client, nil
+	return client.serverID
 }
 
 // Path returns the broker-provided diagnostic module path. It never exposes a
@@ -314,9 +470,11 @@ func (client *Client) Supports(version raw.Version) bool { return client.Version
 
 // WithContext binds ctx to calls made through module during fn without mutating
 // the shared logical client or retaining context beyond the callback.
+//
+//nolint:contextcheck // WithContext intentionally rebinds the lifetime context on a clone.
 func (client *Client) WithContext(ctx context.Context, fn func(raw.Module) error) error {
 	if fn == nil {
-		return fmt.Errorf("pkcs11 proxy: nil contextual callback")
+		return errors.New("pkcs11 proxy: nil contextual callback")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -331,15 +489,48 @@ func (client *Client) invoke(method string, arguments []any, results ...any) err
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return client.invokeContext(ctx, method, arguments, results...)
+	return client.invokeEndpoint(ctx, client.endpoint, method, arguments, results...)
 }
 
-func (client *Client) invokeContext(ctx context.Context, method string, arguments []any, results ...any) error {
+// invokeEndpoint issues one request against a specific proxy endpoint. Open
+// and ListRoutes pass candidate endpoints during establishment; once a client
+// is pinned, invoke routes every call — including retries — to its immutable
+// endpoint only.
+func (client *Client) invokeEndpoint(ctx context.Context, endpoint string, method string, arguments []any, results ...any) (err error) {
 	if client == nil || client.state == nil || client.state.closed.Load() {
 		return raw.ErrClosed
 	}
+	spanCtx, span := telemetryTracer.Start(ctx, "pkcs11.proxy.client "+method,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("pkcs11.endpoint", endpoint),
+			attribute.String("pkcs11.method", method),
+			attribute.String("pkcs11.route", client.target.Route),
+			attribute.String("pkcs11.client_id", hexID(client.id)),
+		))
+	ctx = spanCtx
+	started := time.Now()
+	defer func() {
+		code := clientOutcome(err)
+		endRequestSpan(span, code)
+		attrs := metric.WithAttributes(
+			attribute.String("pkcs11.role", "client"),
+			attribute.String("pkcs11.endpoint", endpoint),
+			attribute.String("pkcs11.route", client.target.Route),
+			attribute.String("pkcs11.method", method),
+			attribute.String("pkcs11.outcome", code),
+		)
+		requestsTotal.Add(ctx, 1, attrs)
+		requestDuration.Record(ctx, time.Since(started).Seconds(), attrs)
+		if errors.Is(err, ErrTargetLost) {
+			targetLostTotal.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("pkcs11.role", "client"),
+				attribute.String("pkcs11.route", client.target.Route),
+			))
+		}
+	}()
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = context.Background() //nolint:contextcheck // Fallback when no lifetime context was bound at Open.
 	}
 	if _, ok := ctx.Deadline(); !ok && client.target.RequestTimeout > 0 {
 		var cancel context.CancelFunc
@@ -347,7 +538,7 @@ func (client *Client) invokeContext(ctx context.Context, method string, argument
 		defer cancel()
 	}
 	methodType, ok := rawModuleType.MethodByName(method)
-	if !ok && method != methodDescribe && method != methodDestroy {
+	if !ok && method != methodDescribe && method != methodDestroy && method != methodListRoutes {
 		return fmt.Errorf("pkcs11 proxy: unknown raw module method %q", method)
 	}
 	if ok && len(arguments) != methodType.Type.NumIn() {
@@ -386,7 +577,7 @@ func (client *Client) invokeContext(ctx context.Context, method string, argument
 			return fmt.Errorf("pkcs11 proxy: obtain request credential: %w", err)
 		}
 	}
-	req := request{Version: protocolVersion, Target: client.target.Route, Revision: client.target.Revision, ClientID: client.id, RequestID: requestID, Epoch: client.state.currentEpoch(), Method: method, Arguments: encodedArguments, Auth: append([]byte(nil), auth...)}
+	req := request{Version: protocolVersion, Target: client.target.Route, Revision: client.target.Revision, ClientID: client.id, RequestID: requestID, ServerID: client.serverID, Epoch: client.state.currentEpoch(), Method: method, Arguments: encodedArguments, Auth: append([]byte(nil), auth...)}
 	if deadline, ok := ctx.Deadline(); ok {
 		req.DeadlineUnixNano = deadline.UnixNano()
 	}
@@ -395,17 +586,22 @@ func (client *Client) invokeContext(ctx context.Context, method string, argument
 	uncertain := false
 	for attempt := 1; attempt <= attempts; attempt++ {
 		resp = response{}
-		connection, err := dialContext(ctx, client.target)
+		connection, err := dialContext(ctx, client.target, endpoint)
 		if err != nil {
+			client.observeTransportError(ctx, endpoint)
 			if attempt < attempts {
 				if waitErr := client.waitRetry(ctx, attempt); waitErr != nil {
 					return waitErr
 				}
 				continue
 			}
-			return fmt.Errorf("pkcs11 proxy: dial %s: %w", client.target.Endpoint, err)
+			// Retries are exhausted and the pinned replica is unreachable. The
+			// logical client may still live there, but this process can no
+			// longer serve it and no other replica owns its state.
+			return errors.Join(ErrTargetLost,
+				fmt.Errorf("pkcs11 proxy: dial %s: %w", endpoint, &transportError{op: "dial", err: err}))
 		}
-		applyConnectionDeadline(connection, ctx, client.target.RequestTimeout)
+		applyConnectionDeadline(ctx, connection, client.target.RequestTimeout)
 		stopContextClose := closeConnectionOnContext(ctx, connection)
 		writeErr := writeMessage(connection, req, client.target.MaximumMessageSize)
 		if writeErr == nil {
@@ -416,6 +612,8 @@ func (client *Client) invokeContext(ctx context.Context, method string, argument
 		if writeErr == nil {
 			break
 		}
+		client.observeTransportError(ctx, endpoint)
+		writeErr = &transportError{op: "roundtrip", err: writeErr}
 		// Once writing begins, a non-idempotent operation may have completed. Retry
 		// only with the same request ID; the broker ledger returns the original
 		// response within the same target epoch.
@@ -424,35 +622,39 @@ func (client *Client) invokeContext(ctx context.Context, method string, argument
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			if uncertain {
-				return fmt.Errorf("%w: %s: %v", ErrOutcomeUnknown, method, ctxErr)
+				return fmt.Errorf("%w: %s: %w", ErrOutcomeUnknown, method, ctxErr)
 			}
 			return ctxErr
 		}
 		if attempt < attempts {
 			if waitErr := client.waitRetry(ctx, attempt); waitErr != nil {
 				if uncertain {
-					return fmt.Errorf("%w: %s: %v", ErrOutcomeUnknown, method, waitErr)
+					return fmt.Errorf("%w: %s: %w", ErrOutcomeUnknown, method, waitErr)
 				}
 				return waitErr
 			}
 			continue
 		}
 		if uncertain {
-			return fmt.Errorf("%w: %s: %v", ErrOutcomeUnknown, method, writeErr)
+			return errors.Join(ErrTargetLost,
+				fmt.Errorf("%w: %s: %w", ErrOutcomeUnknown, method, writeErr))
 		}
-		return fmt.Errorf("pkcs11 proxy: %s transport: %w", method, writeErr)
+		return errors.Join(ErrTargetLost,
+			fmt.Errorf("pkcs11 proxy: %s transport: %w", method, writeErr))
 	}
 	if resp.Version != protocolVersion {
 		return fmt.Errorf("pkcs11 proxy: protocol version %d, want %d", resp.Version, protocolVersion)
 	}
 	remoteErr := decodeError(resp.Error)
-	if remote, ok := remoteErr.(*RemoteError); ok && uncertain && !methodIdempotent(method) {
+	remote, isRemote := errors.AsType[*RemoteError](remoteErr)
+	if isRemote && uncertain && !methodIdempotent(method) {
 		switch remote.Code {
-		case "target_epoch_mismatch", "revision_mismatch", "target_not_found":
-			return fmt.Errorf("%w: %s: %s", ErrOutcomeUnknown, method, remote.Error())
+		case "wrong_server", "target_epoch_mismatch", "revision_mismatch", "target_not_found":
+			return errors.Join(ErrOutcomeUnknown,
+				fmt.Errorf("%s: %w", method, remoteErr))
 		}
 	}
-	if remote, ok := remoteErr.(*RemoteError); !ok || (remote.Code != "target_epoch_mismatch" && remote.Code != "revision_mismatch" && remote.Code != "target_not_found") {
+	if !isRemote || (remote.Code != "target_epoch_mismatch" && remote.Code != "revision_mismatch" && remote.Code != "target_not_found" && remote.Code != "wrong_server") {
 		client.state.setEpoch(resp.Epoch)
 	}
 	if len(resp.Results) != len(results) {
@@ -490,6 +692,45 @@ func (client *Client) invokeContext(ctx context.Context, method string, argument
 	client.applyUpdates(resp.Updates)
 	client.trackOperation(method, arguments, remoteErr)
 	return remoteErr
+}
+
+// observeTransportError counts one failed dial or round-trip against the
+// §30 transport error metric from the client side.
+func (client *Client) observeTransportError(ctx context.Context, endpoint string) {
+	transportErrors.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("pkcs11.role", "client"),
+		attribute.String("pkcs11.endpoint", endpoint),
+		attribute.String("pkcs11.route", client.target.Route),
+	))
+}
+
+// clientOutcome classifies an invokeEndpoint result for metric labels and
+// span status. It mirrors the wire-code taxonomy without ever recording
+// request payloads.
+func clientOutcome(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	var remote *RemoteError
+	if errors.As(err, &remote) && remote.Code != "" {
+		return remote.Code
+	}
+	switch {
+	case errors.Is(err, ErrTargetLost):
+		return "target_lost"
+	case errors.Is(err, ErrOutcomeUnknown):
+		return "outcome_unknown"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		return "context_canceled"
+	case errors.Is(err, raw.ErrClosed):
+		return "closed"
+	}
+	if _, ok := errors.AsType[raw.Error](err); ok {
+		return "ckr"
+	}
+	return "error"
 }
 
 func (client *Client) waitRetry(ctx context.Context, attempt int) error {
@@ -615,11 +856,11 @@ func (client *Client) Close() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), client.target.RequestTimeout)
 	defer cancel()
-	// invokeContext observes closed, so issue the final request through a shallow
+	// invokeEndpoint observes closed, so issue the final request through a shallow
 	// state that remains open only for this cleanup call.
 	clone := *client
 	clone.state = &clientState{epoch: client.state.currentEpoch(), active: make(map[activeParameterKey][]*raw.Mechanism)}
-	err := clone.invokeContext(ctx, methodDestroy, nil)
+	err := clone.invokeEndpoint(ctx, client.endpoint, methodDestroy, nil)
 	client.state.activeMu.Lock()
 	client.state.active = make(map[activeParameterKey][]*raw.Mechanism)
 	client.state.activeMu.Unlock()
@@ -632,5 +873,7 @@ func (client *Client) Close() error {
 // matter.
 func (client *Client) Destroy() { _ = client.Close() }
 
-var _ raw.Module = (*Client)(nil)
-var _ raw.ContextualModule = (*Client)(nil)
+var (
+	_ raw.Module           = (*Client)(nil)
+	_ raw.ContextualModule = (*Client)(nil)
+)

@@ -43,7 +43,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer func() {
-		if err := client.Close(); err != nil {
+		if err := client.Close(ctx); err != nil {
 			log.Printf("close PKCS#11 client: %v", err)
 		}
 	}()

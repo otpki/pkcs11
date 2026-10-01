@@ -2,7 +2,7 @@ package ibm
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 
 	"github.com/otpki/pkcs11/proxy"
 )
@@ -20,7 +20,7 @@ func (mlkemProxyCodec) Encode(value any) ([]byte, bool, error) {
 		return nil, false, nil
 	}
 	if parameters == nil {
-		return nil, true, fmt.Errorf("ibm: nil ML-KEM parameters")
+		return nil, true, errors.New("ibm: nil ML-KEM parameters")
 	}
 	encoded, err := json.Marshal(parameters)
 	return encoded, true, err

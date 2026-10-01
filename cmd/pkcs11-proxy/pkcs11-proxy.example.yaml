@@ -1,16 +1,27 @@
 # Example configuration for the pkcs11-proxy broker.
 #
-# Every value may also be supplied through the environment as
-# PKCS11_PROXY_<SECTION>_<KEY>, e.g. PKCS11_PROXY_TARGET_MODULE or
-# PKCS11_PROXY_INSECURE. Flags (--listen, --insecure, --dev-ui) override both.
+# Every scalar key here is also a flag spelled identically (--insecure,
+# --otel.endpoint) and a PKCS11_PROXY_* environment variable
+# (PKCS11_PROXY_INSECURE, PKCS11_PROXY_OTEL_ENDPOINT). Precedence:
+# flag > env > this file > built-in default. The targets list itself is
+# YAML-only — neither flags nor the environment can express it.
 #
 # The broker NEVER reads the HSM PIN from this file or the environment. Clients
 # supply it with their login; the first successful login activates the token
 # and the broker retains only an in-memory digest to verify later clients.
 
-# Address clients dial to reach this broker (proxy.Target.Endpoint on the
-# client side). Keep it reachable from every workload that needs the HSM.
+# Address clients dial to reach this broker (an entry in proxy.Target.
+# Endpoints on the client side). Keep it reachable from every workload that
+# needs the HSM. When running active-active replicas, each instance has its
+# own listen address and clients list all of them.
 listen: "127.0.0.1:9443"
+
+# Graceful scale-down bound. On SIGINT/SIGTERM the broker enters draining:
+# it stops accepting new logical clients (they are told to pick another
+# replica via the describe handshake) while established clients keep working
+# until they close. After this timeout the remaining clients are cut and
+# observe ErrTargetLost.
+# drain_timeout: "5m"
 
 # Plaintext TCP for local development only. Without tls.cert_file/tls.key_file
 # the broker refuses to start unless insecure is true. Insecure mode still
@@ -21,48 +32,75 @@ insecure: true
 # TLS protects the client→broker hop. The PIN travels inside C_Login, so an
 # observer on this hop cannot read it even in insecure mode, but TLS also
 # protects every operation and object that crosses the wire.
+#
+# Development certificates: `pkcs11-proxy pki init --dir ./pki` mints a
+# throwaway CA plus server and client certs; the dev UI's "dev mTLS tree"
+# panel generates the same bundle in memory for download.
 # tls:
-#   cert_file: "./server.crt"        # PEM server certificate
-#   key_file: "./server.key"         # PEM private key
-#   client_ca_file: "./clients-ca.crt"   # optional; when set, clients must
+#   cert_file: "./pki/server.pem"      # PEM server certificate (+ chain)
+#   key_file: "./pki/server.key"       # PEM private key
+#   client_ca_file: "./pki/ca.pem"     # optional; when set, clients must
 #                                    # present a certificate signed by this
 #                                    # CA (mutual TLS). Their certificate
 #                                    # then doubles as the workload identity.
 
-target:
-  # Public route name of this HSM. Clients pass it as proxy.Target.Route, and
-  # every request names the route it wants — one broker can multiplex several
-  # targets in the library API, though this binary configures exactly one.
-  id: "hsm"
-  # Free-form version string clients must match (proxy.Target.Revision).
-  # Bump it whenever this configuration changes in a way clients should
-  # notice; a mismatch makes the client's describe handshake fail fast instead
-  # of silently running against a changed target.
-  revision: "v1"
+# Each entry under targets publishes one route: a public name plus the local
+# module and token it binds to. Clients select a route with
+# proxy.Target{Route: "<name>", Revision: "v1"} — the revision is a fixed
+# protocol value — and can discover the published routes ahead of time with
+# proxy.ListRoutes.
+#
+# Repeat one module with different token selectors to expose several tokens on
+# the same HSM; list different modules to front several HSMs behind one
+# broker. Entries that share a module path share one loaded library.
+# A route's name defaults to "hsm" when omitted.
+#
+# For development without an HSM, module: "test" binds a route to the
+# in-memory test module — "test:<name>:<count>" gives the virtual HSM that
+# name and that many token-present slots (labels "<name>-token-<slot>", user
+# PIN "1234"). Routes sharing the same test module share the virtual HSM.
+# pkcs11-proxy serve --test starts the whole demo topology without a config file.
+targets:
+  - # Public route name — the value clients pass as proxy.Target.Route.
+    name: "hsm"
 
-  # Local PKCS #11 module the broker drives — the vendor's shared library on
-  # this host (libcs_pkcs11_R3.so, libprimusP11.so, libsofthsm2.so, ...).
-  # The broker loads it once and owns every physical session to the token.
-  module: "/opt/vendor/lib/libpkcs11.so"
+    # Local PKCS #11 module the broker drives — the vendor's shared library on
+    # this host (libcs_pkcs11_R3.so, libprimusP11.so, libsofthsm2.so, ...).
+    # The broker owns every physical session the module opens for this route.
+    module: "/opt/vendor/lib/libpkcs11.so"
 
-  # Which token inside the module to use. An empty label picks the first
-  # token the module reports; set it when a module exposes several slots.
-  token_label: "mytoken"
-  # token_serial: ""               # optional second selector when two tokens
-                                  # share a label
+    # Which token inside the module this route binds to. Each route exposes
+    # exactly one token: remote clients always see a single-slot module no
+    # matter how many slots the physical library reports. An empty label
+    # picks the first token the module reports.
+    token_label: "mytoken"
+    # token_serial: "0102"         # second selector when two tokens share a label
+    # slot_id: 0                   # or select by the module-assigned slot ID
+                                 # (the slot position; serial follows the token)
 
-  # Bundled vendor modules to enable, by adapter ID or product name
-  # (for example: utimaco, securosys, nshield, softhsm, thales). Vendor modules
-  # teach the broker provider-specific mechanisms, attribute templates, and
-  # parameter codecs. An empty list enables every module shipped with this
-  # repository — restrict it when the client should see a smaller surface.
-  # IMPORTANT: clients must configure the same vendor set (proxy.Target.
-  # Vendors); the describe handshake requires exact parameter-codec parity.
-  vendors: []
+    # Bundled vendor modules to enable, by adapter ID or product name
+    # (for example: utimaco, securosys, nshield, softhsm, thales). Vendor modules
+    # teach the broker provider-specific mechanisms, attribute templates, and
+    # parameter codecs. An empty list enables every module shipped with this
+    # repository — restrict it when the client should see a smaller surface.
+    # IMPORTANT: clients must configure the same vendor set (proxy.Target.
+    # Vendors); the describe handshake requires exact parameter-codec parity.
+    vendors: []
 
-  # The physical identity activated on the token. Only the normal PKCS #11
-  # user is supported; SO/maintenance access is not exposed by this broker.
-  user_type: "user"
+  # - name: "partition-b"            # second token on the same HSM
+  #   module: "/opt/vendor/lib/libpkcs11.so"
+  #   token_label: "partition-b"
+
+  # - name: "softhsm-dev"            # a second HSM/middleware entirely
+  #   module: "/usr/lib/softhsm/libsofthsm2.so"
+  #   token_label: "dev-token"
+
+  # - name: "fake-token"             # in-memory test module, no hardware —
+  #   module: "test"                 # same PIN "1234" as pkcs11-proxy serve --test
+  #   token_label: "test-token-1"
+
+# The physical identity activated on each token is always the normal PKCS #11
+# user; SO/maintenance access is not exposed by this broker.
 
 sessions:
   # Hard cap on native HSM sessions the broker opens for this target,
@@ -117,11 +155,46 @@ verifier:
 
 dev_ui:
   # Read-only operational dashboard for development: activation state, session
-  # pool meters, client counts, dedup ledger usage. It serves secret-free
-  # counters only — no PINs, no object identities, no mutations. Disabled by
-  # default; --dev-ui enables it for a single run.
+  # pool meters, client counts, dedup ledger usage, request counters, and
+  # telemetry-pipeline health. It serves secret-free counters only — no PINs,
+  # no object identities, no mutations. Disabled by default;
+  # --dev_ui.enabled turns it on for a single run.
   enabled: false
   # Must be a loopback address unless allow_remote is set — the dashboard has
   # no authentication of its own, so exposing it leaks operational metadata.
   listen: "127.0.0.1:9463"
   allow_remote: false
+
+# Application logging to stderr via slog. Records travel a bounded
+# non-blocking queue to a dedicated writer goroutine: a slow stderr can never
+# stall request handling, and overflow is counted and announced downstream
+# rather than silently lost.
+# logging:
+#   level: "info"          # debug | info | warn | error
+#   format: "text"         # text | json
+#   queue_size: 8192       # records buffered before drops are counted
+
+# Signed audit log: event records are JSON leaf lines sealed in batches by
+# signed Merkle checkpoints — one Ed25519 signature attests the whole batch's
+# root, and checkpoints chain to one another, so edits, reordering, and
+# removals inside sealed ranges are detectable offline. Records after the
+# newest checkpoint are unsealed until the next batch/interval/shutdown seal.
+# Disabled while path is empty.
+# audit:
+#   path: "./audit.log"
+#   key_file: "./audit.key"   # Ed25519 seed, created 0600 on first run;
+#                             # <key_file>.pub holds the public key for:
+#                             #   pkcs11-proxy audit verify audit.log --key audit.key.pub
+#   queue_size: 4096          # events buffered before drops are counted
+#   batch_size: 64            # records sealed per signed checkpoint
+#   checkpoint_interval: "30s" # seal pending records even under low traffic
+
+# OpenTelemetry export over OTLP/HTTP. The proxy library always emits
+# pkcs11_proxy_* metrics, request spans, and §29 log records through the
+# global OTel providers; an endpoint here is what makes them reach a
+# collector. Empty endpoint = no export (devui still shows the counters).
+# otel:
+#   endpoint: "otel-collector:4318"   # OTLP/HTTP; http(s):// scheme overrides insecure
+#   insecure: false                   # plaintext HTTP instead of TLS
+#   service_name: "pkcs11-proxy"
+#   metric_interval: "15s"

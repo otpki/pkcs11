@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -37,7 +38,7 @@ func main() {
 			fatal(err)
 		}
 		if !bytes.Equal(existing, output) {
-			fatal(fmt.Errorf("%s is stale; run go generate ./...", path))
+			fatal(fmt.Errorf("%s is stale; run 'go generate ./...'", path))
 		}
 		return
 	}
@@ -57,7 +58,7 @@ func findRoot() (string, error) {
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return "", fmt.Errorf("go.mod not found")
+			return "", errors.New("go.mod not found")
 		}
 		dir = parent
 	}
@@ -86,7 +87,7 @@ func parseMethods(path string) ([]method, error) {
 			}
 			iface, ok := typeSpec.Type.(*ast.InterfaceType)
 			if !ok {
-				return nil, fmt.Errorf("Module is not interface")
+				return nil, errors.New("module declaration is not an interface")
 			}
 			var methods []method
 			for _, field := range iface.Methods.List {
@@ -102,7 +103,7 @@ func parseMethods(path string) ([]method, error) {
 			return methods, nil
 		}
 	}
-	return nil, fmt.Errorf("raw.Module not found")
+	return nil, errors.New("raw.Module not found")
 }
 
 var predeclaredTypes = map[string]struct{}{
@@ -177,34 +178,32 @@ func expression(node ast.Node) string {
 	return buffer.String()
 }
 
-func fields(list *ast.FieldList) (declaration string, names []string, types []string) {
+func fields(list *ast.FieldList) (declaration string, names []string) {
 	if list == nil {
-		return "", nil, nil
+		return "", nil
 	}
 	var parts []string
 	for _, field := range list.List {
 		typ := expression(field.Type)
 		if len(field.Names) == 0 {
 			parts = append(parts, typ)
-			types = append(types, typ)
 			continue
 		}
 		var group []string
 		for _, name := range field.Names {
 			group = append(group, name.Name)
 			names = append(names, name.Name)
-			types = append(types, typ)
 		}
 		parts = append(parts, strings.Join(group, ", ")+" "+typ)
 	}
-	return strings.Join(parts, ", "), names, types
+	return strings.Join(parts, ", "), names
 }
 
 func resultSignature(list *ast.FieldList) string {
 	if list == nil || len(list.List) == 0 {
 		return ""
 	}
-	decl, _, _ := fields(list)
+	decl, _ := fields(list)
 	if len(list.List) == 1 && len(list.List[0].Names) == 0 {
 		return " " + decl
 	}
@@ -219,9 +218,9 @@ func renderClient(methods []method) ([]byte, error) {
 		if skip[method.Name] {
 			continue
 		}
-		params, names, _ := fields(method.Params)
-		out.WriteString("// " + method.Name + " forwards raw.Module." + method.Name + " over one bounded proxy request.\n")
-		out.WriteString("func (c *Client) " + method.Name + "(" + params + ")" + resultSignature(method.Results) + " {\n")
+		params, names := fields(method.Params)
+		fmt.Fprintf(&out, "// %s forwards raw.Module.%s over one bounded proxy request.\n", method.Name, method.Name)
+		fmt.Fprintf(&out, "func (c *Client) %s(%s)%s {\n", method.Name, params, resultSignature(method.Results))
 		args := "nil"
 		if len(names) > 0 {
 			args = "[]any{" + strings.Join(names, ", ") + "}"
@@ -232,11 +231,12 @@ func renderClient(methods []method) ([]byte, error) {
 				resultTypes = append(resultTypes, expression(field.Type))
 			}
 		}
-		if len(resultTypes) == 0 {
-			out.WriteString("\t_ = c.invoke(\"" + method.Name + "\", " + args + ")\n")
-		} else if len(resultTypes) == 1 && resultTypes[0] == "error" {
-			out.WriteString("\treturn c.invoke(\"" + method.Name + "\", " + args + ")\n")
-		} else {
+		switch {
+		case len(resultTypes) == 0:
+			fmt.Fprintf(&out, "\t_ = c.invoke(%q, %s)\n", method.Name, args)
+		case len(resultTypes) == 1 && resultTypes[0] == "error":
+			fmt.Fprintf(&out, "\treturn c.invoke(%q, %s)\n", method.Name, args)
+		default:
 			valueCount := len(resultTypes)
 			if resultTypes[valueCount-1] == "error" {
 				valueCount--
@@ -248,7 +248,7 @@ func renderClient(methods []method) ([]byte, error) {
 			}
 			fmt.Fprintf(&out, "\terr := c.invoke(%q, %s", method.Name, args)
 			if len(dest) > 0 {
-				out.WriteString(", " + strings.Join(dest, ", "))
+				fmt.Fprintf(&out, ", %s", strings.Join(dest, ", "))
 			}
 			out.WriteString(")\n\treturn ")
 			var returns []string
@@ -256,7 +256,7 @@ func renderClient(methods []method) ([]byte, error) {
 				returns = append(returns, fmt.Sprintf("result%d", i))
 			}
 			returns = append(returns, "err")
-			out.WriteString(strings.Join(returns, ", ") + "\n")
+			fmt.Fprintf(&out, "%s\n", strings.Join(returns, ", "))
 		}
 		out.WriteString("}\n\n")
 	}

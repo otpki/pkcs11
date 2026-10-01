@@ -13,6 +13,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -102,7 +103,7 @@ func (r *Runner) testRandom(ctx context.Context, testCase Case) (map[string]any,
 		return nil, fmt.Errorf("conformance: random output lengths are %d and %d, expected %d", len(first), len(second), length)
 	}
 	if bytes.Equal(first, second) {
-		return nil, fmt.Errorf("conformance: two random outputs were identical")
+		return nil, errors.New("conformance: two random outputs were identical")
 	}
 	return map[string]any{"bytes_per_call": length}, nil
 }
@@ -138,7 +139,7 @@ func (r *Runner) testDigest(ctx context.Context, _ Case) (map[string]any, error)
 		return nil, err
 	}
 	if !bytes.Equal(actual, expected[:]) {
-		return nil, fmt.Errorf("conformance: token SHA-256 output differs from Go SHA-256")
+		return nil, errors.New("conformance: token SHA-256 output differs from Go SHA-256")
 	}
 	return map[string]any{"digest_bytes": len(actual)}, nil
 }
@@ -199,11 +200,12 @@ func (r *Runner) testGenerate(ctx context.Context, testCase Case) (map[string]an
 		return nil, errorsJoin(findErr, cleanupErr)
 	}
 	expectedObjects := 2
-	if pair.Public.Handle != 0 && pair.Public.Handle == pair.Private.Handle {
+	switch {
+	case pair.Public.Handle != 0 && pair.Public.Handle == pair.Private.Handle:
 		expectedObjects = 1
-	} else if pair.Public.UniqueID != "" && pair.Public.UniqueID == pair.Private.UniqueID {
+	case pair.Public.UniqueID != "" && pair.Public.UniqueID == pair.Private.UniqueID:
 		expectedObjects = 1
-	} else if pair.Public.Class == pair.Private.Class && bytes.Equal(pair.Public.ID, pair.Private.ID) {
+	case pair.Public.Class == pair.Private.Class && bytes.Equal(pair.Public.ID, pair.Private.ID):
 		expectedObjects = 1
 	}
 	if len(found) < expectedObjects {
@@ -244,7 +246,7 @@ func (r *Runner) testSign(ctx context.Context, testCase Case) (map[string]any, e
 
 	message := testMessage(testCase.MessageBytes)
 	input := message
-	var opts crypto.SignerOpts = crypto.Hash(0)
+	var opts crypto.SignerOpts
 	intent := pkcs11.Intent{Algorithm: testCase.Algorithm, Hash: hash, Context: []byte(testCase.Context)}
 
 	switch testCase.Algorithm {
@@ -296,12 +298,12 @@ func (r *Runner) testSign(ctx context.Context, testCase Case) (map[string]any, e
 		opts = pqcOpts
 	}
 
-	signature, err := signer.Sign(rand.Reader, input, opts)
+	signature, err := signer.SignContext(ctx, input, opts)
 	if err != nil {
 		return nil, cleanup(fmt.Errorf("sign with %s: %w", testCase.Algorithm, err))
 	}
 	if len(signature) == 0 {
-		return nil, cleanup(fmt.Errorf("conformance: token returned an empty signature"))
+		return nil, cleanup(errors.New("conformance: token returned an empty signature"))
 	}
 	if err := r.client.Verify(ctx, pair.Public, input, signature, signatureOptionsFromIntent(intent)); err != nil {
 		return nil, cleanup(fmt.Errorf("verify generated signature: %w", err))
@@ -313,7 +315,7 @@ func (r *Runner) testSign(ctx context.Context, testCase Case) (map[string]any, e
 	corrupt := append([]byte(nil), signature...)
 	corrupt[len(corrupt)-1] ^= 0x01
 	if err := r.client.Verify(ctx, pair.Public, input, corrupt, signatureOptionsFromIntent(intent)); err == nil {
-		return nil, cleanup(fmt.Errorf("conformance: corrupted signature was accepted"))
+		return nil, cleanup(errors.New("conformance: corrupted signature was accepted"))
 	}
 	remaining := any(nil)
 	if testCase.Algorithm == pkcs11.AlgorithmHSS || testCase.Algorithm == pkcs11.AlgorithmLMS {
@@ -400,7 +402,7 @@ func (r *Runner) testSymmetricEncrypt(ctx context.Context, testCase Case) (map[s
 		return nil, errorsJoin(err, cleanupErr)
 	}
 	if !bytes.Equal(recovered, plaintext) {
-		return nil, errorsJoin(fmt.Errorf("conformance: decrypted plaintext differs from input"), cleanupErr)
+		return nil, errorsJoin(errors.New("conformance: decrypted plaintext differs from input"), cleanupErr)
 	}
 	return map[string]any{"mode": mode, "plaintext_bytes": len(plaintext), "ciphertext_bytes": len(encrypted.Ciphertext)}, cleanupErr
 }
@@ -437,7 +439,7 @@ func (r *Runner) testRSAEncrypt(ctx context.Context, testCase Case) (map[string]
 		return nil, errorsJoin(err, cleanupErr)
 	}
 	if !bytes.Equal(recovered, plaintext) {
-		return nil, errorsJoin(fmt.Errorf("conformance: RSA decrypted plaintext differs from input"), cleanupErr)
+		return nil, errorsJoin(errors.New("conformance: RSA decrypted plaintext differs from input"), cleanupErr)
 	}
 	return map[string]any{"padding": padding, "ciphertext_bytes": len(encrypted.Ciphertext)}, cleanupErr
 }
@@ -491,7 +493,7 @@ func (r *Runner) testWrap(ctx context.Context, _ Case) (map[string]any, error) {
 		return nil, errorsJoin(err, cleanupErr)
 	}
 	if !bytes.Equal(originalCiphertext, unwrappedCiphertext) {
-		return nil, errorsJoin(fmt.Errorf("conformance: unwrapped key does not reproduce the original ciphertext"), cleanupErr)
+		return nil, errorsJoin(errors.New("conformance: unwrapped key does not reproduce the original ciphertext"), cleanupErr)
 	}
 	return map[string]any{"wrapped_bytes": len(wrapped)}, cleanupErr
 }
@@ -594,7 +596,7 @@ func (r *Runner) testAuthenticatedWrap(ctx context.Context, _ Case) (map[string]
 		return nil, errorsJoin(err, cleanupErr)
 	}
 	if !bytes.Equal(originalCiphertext, unwrappedCiphertext) {
-		return nil, errorsJoin(fmt.Errorf("conformance: authenticated-unwrapped key differs from original"), cleanupErr)
+		return nil, errorsJoin(errors.New("conformance: authenticated-unwrapped key differs from original"), cleanupErr)
 	}
 	return map[string]any{
 		"wrapped_bytes": len(wrapped),
@@ -688,7 +690,7 @@ func (r *Runner) testECDH(ctx context.Context, testCase Case) (map[string]any, e
 			return operationErr
 		}
 		if len(leftAttrs) != 1 || len(rightAttrs) != 1 {
-			return fmt.Errorf("conformance: ECDH output attributes are incomplete")
+			return errors.New("conformance: ECDH output attributes are incomplete")
 		}
 		leftSecret = append([]byte(nil), leftAttrs[0].Value...)
 		rightSecret = append([]byte(nil), rightAttrs[0].Value...)
@@ -699,7 +701,7 @@ func (r *Runner) testECDH(ctx context.Context, testCase Case) (map[string]any, e
 		return nil, errorsJoin(err, cleanupErr)
 	}
 	if len(leftSecret) == 0 || !bytes.Equal(leftSecret, rightSecret) {
-		return nil, errorsJoin(fmt.Errorf("conformance: ECDH secrets are empty or differ"), cleanupErr)
+		return nil, errorsJoin(errors.New("conformance: ECDH secrets are empty or differ"), cleanupErr)
 	}
 	return map[string]any{
 		"curve":        algorithm,
@@ -713,7 +715,7 @@ func (r *Runner) ecPoint(ctx context.Context, object pkcs11.ObjectRef) ([]byte, 
 		return nil, err
 	}
 	if len(attributes) != 1 || len(attributes[0].Value) == 0 {
-		return nil, fmt.Errorf("conformance: CKA_EC_POINT is empty")
+		return nil, errors.New("conformance: CKA_EC_POINT is empty")
 	}
 	var point []byte
 	if rest, decodeErr := asn1.Unmarshal(attributes[0].Value, &point); decodeErr == nil && len(rest) == 0 && len(point) != 0 {
@@ -780,7 +782,7 @@ func (r *Runner) testImportSecret(ctx context.Context, testCase Case) (map[strin
 		return nil, errorsJoin(exportErr, r.cleanup(ctx, object))
 	}
 	if !bytes.Equal(value, exported) {
-		return nil, errorsJoin(fmt.Errorf("conformance: imported key value differs from exported value"), r.cleanup(ctx, object))
+		return nil, errorsJoin(errors.New("conformance: imported key value differs from exported value"), r.cleanup(ctx, object))
 	}
 	ciphertext, err := r.encryptCBC(ctx, object)
 	cleanupErr := r.cleanup(ctx, object)
@@ -830,7 +832,7 @@ func (r *Runner) testMessageSign(ctx context.Context, testCase Case) (map[string
 		testCase.Algorithm = pkcs11.AlgorithmRSA
 	}
 	if testCase.Algorithm != pkcs11.AlgorithmRSA {
-		return nil, fmt.Errorf("conformance: message-sign currently uses RSA")
+		return nil, errors.New("conformance: message-sign currently uses RSA")
 	}
 	if testCase.RSABits == 0 {
 		testCase.RSABits = 2048
@@ -923,7 +925,7 @@ func (r *Runner) testSignatureFirstVerify(ctx context.Context, testCase Case) (m
 		testCase.Algorithm = pkcs11.AlgorithmRSA
 	}
 	if testCase.Algorithm != pkcs11.AlgorithmRSA {
-		return nil, fmt.Errorf("conformance: signature-first-verify currently uses RSA")
+		return nil, errors.New("conformance: signature-first-verify currently uses RSA")
 	}
 	if testCase.RSABits == 0 {
 		testCase.RSABits = 2048
@@ -1060,7 +1062,7 @@ func (r *Runner) testKEM(ctx context.Context, testCase Case) (map[string]any, er
 		return nil, errorsJoin(fmt.Errorf("export KEM secrets: %w", errorsJoin(leftErr, rightErr)), cleanupErr)
 	}
 	if !bytes.Equal(left, right) {
-		return nil, errorsJoin(fmt.Errorf("conformance: encapsulated and decapsulated secrets differ"), cleanupErr)
+		return nil, errorsJoin(errors.New("conformance: encapsulated and decapsulated secrets differ"), cleanupErr)
 	}
 	return map[string]any{"ciphertext_bytes": len(encap.Ciphertext), "secret_bytes": len(left)}, cleanupErr
 }
@@ -1110,7 +1112,7 @@ func (r *Runner) testCertificate(ctx context.Context, testCase Case) (map[string
 		testCase.Algorithm = pkcs11.AlgorithmRSA
 	}
 	if testCase.Algorithm != pkcs11.AlgorithmRSA {
-		return nil, fmt.Errorf("conformance: certificate test currently uses RSA")
+		return nil, errors.New("conformance: certificate test currently uses RSA")
 	}
 	options := r.keyPairOptions(testCase)
 	if options.RSABits == 0 {
@@ -1152,14 +1154,14 @@ func (r *Runner) testCertificate(ctx context.Context, testCase Case) (map[string
 		return nil, errorsJoin(findErr, cleanupErr)
 	}
 	if !bytes.Equal(found.Certificate.Raw, certificate.Raw) {
-		return nil, errorsJoin(fmt.Errorf("conformance: imported certificate differs from source"), cleanupErr)
+		return nil, errorsJoin(errors.New("conformance: imported certificate differs from source"), cleanupErr)
 	}
 	return map[string]any{"certificate_bytes": len(certificate.Raw)}, cleanupErr
 }
 
 func (r *Runner) testIdleRecovery(ctx context.Context, testCase Case) (map[string]any, error) {
 	if testCase.IdleFor <= 0 {
-		return nil, fmt.Errorf("conformance: idle-recovery requires idle_for")
+		return nil, errors.New("conformance: idle-recovery requires idle_for")
 	}
 	if testCase.Algorithm == "" {
 		testCase.Algorithm = pkcs11.AlgorithmRSA
@@ -1226,7 +1228,7 @@ func (r *Runner) testIdleRecovery(ctx context.Context, testCase Case) (map[strin
 		after, err = sign()
 		return err
 	})
-	cleanupCtx := ctx
+	cleanupCtx := ctx //nolint:contextcheck // Deferred cleanup intentionally detaches when ctx is already canceled.
 	cleanupCancel := func() {}
 	if ctx.Err() != nil {
 		cleanupCtx, cleanupCancel = context.WithTimeout(context.Background(), 30*time.Second)
@@ -1236,11 +1238,15 @@ func (r *Runner) testIdleRecovery(ctx context.Context, testCase Case) (map[strin
 	if err != nil {
 		return nil, errorsJoin(fmt.Errorf("sign after %s idle: %w", testCase.IdleFor, err), cleanupErr)
 	}
+	publicKey, ok := signer.Public().(*rsa.PublicKey)
+	if !ok {
+		return nil, errorsJoin(errors.New("conformance: RSA signer public key has unexpected type"), cleanupErr)
+	}
 	for name, signature := range map[string][]byte{"before": before, "after": after} {
 		if len(signature) == 0 {
 			return nil, errorsJoin(fmt.Errorf("conformance: %s-idle signature is empty", name), cleanupErr)
 		}
-		if verifyErr := rsa.VerifyPSS(signer.Public().(*rsa.PublicKey), crypto.SHA256, digest[:], signature, &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: crypto.SHA256}); verifyErr != nil {
+		if verifyErr := rsa.VerifyPSS(publicKey, crypto.SHA256, digest[:], signature, &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: crypto.SHA256}); verifyErr != nil {
 			return nil, errorsJoin(fmt.Errorf("verify %s-idle signature: %w", name, verifyErr), cleanupErr)
 		}
 	}
@@ -1328,7 +1334,7 @@ func verifyWithGo(public crypto.PublicKey, algorithm pkcs11.Algorithm, hash cryp
 		return true, rsa.VerifyPKCS1v15(key, hash, input, signature)
 	case *ecdsa.PublicKey:
 		if !ecdsa.VerifyASN1(key, input, signature) {
-			return true, fmt.Errorf("ECDSA signature is invalid")
+			return true, errors.New("ECDSA signature is invalid")
 		}
 		return true, nil
 	case ed25519.PublicKey:
@@ -1336,7 +1342,7 @@ func verifyWithGo(public crypto.PublicKey, algorithm pkcs11.Algorithm, hash cryp
 			return false, nil
 		}
 		if !ed25519.Verify(key, input, signature) {
-			return true, fmt.Errorf("Ed25519 signature is invalid")
+			return true, errors.New("Ed25519 signature is invalid")
 		}
 		return true, nil
 	default:
@@ -1372,7 +1378,7 @@ func (r *Runner) cleanup(ctx context.Context, objects ...pkcs11.ObjectRef) error
 func findObjectHandle(session *testSession, object pkcs11.ObjectRef) (raw.ObjectHandle, error) {
 	if object.ID == nil && object.Label == "" && object.UniqueID == "" {
 		if object.Handle == 0 {
-			return 0, fmt.Errorf("conformance: object has no handle or stable locator")
+			return 0, errors.New("conformance: object has no handle or stable locator")
 		}
 		return object.Handle, nil
 	}

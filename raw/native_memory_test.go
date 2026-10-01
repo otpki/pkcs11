@@ -154,7 +154,7 @@ func TestNestedAttributeTemplateRoundTripAndUnavailableValue(t *testing.T) {
 
 func TestCheckedNativeLengthRejectsHostOverflow(t *testing.T) {
 	abi := HostNativeABI()
-	if _, err := abi.checkedLength(^uint(0)); err == nil && ^uint(0) > uint(^uint(0)>>1) {
+	if _, err := abi.checkedLength(^uint(0)); err == nil && ^uint(0) > ^uint(0)>>1 {
 		t.Fatal("expected a length larger than MaxInt to be rejected")
 	}
 }

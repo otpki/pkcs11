@@ -2,6 +2,7 @@ package pkcs11
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"sort"
@@ -314,7 +315,7 @@ func DiscoverWithCompatibility(module raw.Module, compatibility CompatibilityCon
 
 func discover(module raw.Module, compatibility CompatibilityConfig, vendors []VendorModule) ([]Device, error) {
 	if module == nil {
-		return nil, fmt.Errorf("pkcs11: module is nil")
+		return nil, errors.New("pkcs11: module is nil")
 	}
 	moduleInfo, err := module.GetInfo()
 	if err != nil {
@@ -389,16 +390,16 @@ func discover(module raw.Module, compatibility CompatibilityConfig, vendors []Ve
 	return devices, nil
 }
 
-func discoverManaged(module *moduleRef, compatibility CompatibilityConfig, vendors []VendorModule) ([]Device, error) {
-	return discoverManagedWithPlan(module, behaviorPlan{}, compatibility, vendors)
+func discoverManaged(ctx context.Context, module *moduleRef, compatibility CompatibilityConfig, vendors []VendorModule) ([]Device, error) {
+	return discoverManagedWithPlan(ctx, module, behaviorPlan{}, compatibility, vendors)
 }
 
-func discoverManagedWithPlan(module *moduleRef, plan behaviorPlan, compatibility CompatibilityConfig, vendors []VendorModule) (devices []Device, err error) {
+func discoverManagedWithPlan(ctx context.Context, module *moduleRef, plan behaviorPlan, compatibility CompatibilityConfig, vendors []VendorModule) (devices []Device, err error) {
 	if module == nil {
-		return nil, fmt.Errorf("pkcs11: module is closed")
+		return nil, errors.New("pkcs11: module is closed")
 	}
-	err = module.execute(context.Background(), plan, func(ctx raw.Module) error {
-		devices, err = discover(ctx, compatibility, vendors)
+	err = module.execute(ctx, plan, func(m raw.Module) error {
+		devices, err = discover(m, compatibility, vendors)
 		return err
 	})
 	return devices, err

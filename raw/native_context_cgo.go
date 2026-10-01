@@ -96,7 +96,7 @@ func cgoSelectedInterface(bridge *C.p11x_ctx) InterfaceInfo {
 	}
 }
 
-func (n nativeContext) valid() bool { return n.bridge != nil }
+func (n *nativeContext) valid() bool { return n.bridge != nil }
 
 func (n *nativeContext) close() error {
 	if n == nil || n.bridge == nil {
@@ -107,7 +107,7 @@ func (n *nativeContext) close() error {
 	return nil
 }
 
-func (n nativeContext) call(id functionID, arguments ...uintptr) uint {
+func (n *nativeContext) call(id functionID, arguments ...uintptr) uint {
 	if n.bridge == nil {
 		return CKR_FUNCTION_NOT_SUPPORTED
 	}

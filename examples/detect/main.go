@@ -12,6 +12,15 @@ import (
 )
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Fatal(r)
+		}
+	}()
+	run()
+}
+
+func run() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -24,16 +33,16 @@ func main() {
 	// native code. Use it to preview discovery policy safely.
 	candidates, err := pkcs11.ModuleCandidates(config, all.Modules()...)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	log.Printf("discovery produced %d candidate paths", len(candidates))
 	probes, err := pkcs11.DetectModules(ctx, config, all.Modules()...)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	output, err := json.MarshalIndent(probes, "", "  ")
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	os.Stdout.Write(output)       //nolint:errcheck
 	os.Stdout.Write([]byte("\n")) //nolint:errcheck
@@ -53,6 +62,6 @@ func main() {
 		log.Printf("no detected module was opened: %v", err)
 		return
 	}
-	defer client.Close() // handle the error in a long-running service
+	defer func() { _ = client.Close(ctx) }() // handle the error in a long-running service
 	log.Printf("opened detected module=%s vendor=%s", client.ModulePath(), client.Adapter().Name)
 }

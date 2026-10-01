@@ -131,8 +131,7 @@ func sanitizeActivationFailure(err error) error {
 	case errors.Is(err, context.DeadlineExceeded):
 		return context.DeadlineExceeded
 	}
-	var remote *RemoteError
-	if errors.As(err, &remote) {
+	if remote, ok := errors.AsType[*RemoteError](err); ok {
 		return &RemoteError{Code: remote.Code, Message: "activation request was rejected"}
 	}
 	return &RemoteError{Code: "activation_failed", Message: "physical HSM activation failed"}
@@ -194,6 +193,8 @@ func (coordinator *activationCoordinator) activeGeneration() (uint64, bool) {
 // ensure returns the current activation generation. Exactly one caller runs
 // activate. Followers wait on the same attempt with their own context and never
 // submit their PIN to the HSM.
+//
+//nolint:contextcheck // Nil callers intentionally fall back to a detached context.
 func (coordinator *activationCoordinator) ensure(
 	ctx context.Context,
 	principal string,

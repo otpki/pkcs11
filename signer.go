@@ -8,6 +8,10 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"errors"
+
+	// CKM_SHA_1 and the SHA-2 mechanisms require the hash implementations
+	// registered for crypto.SignerOpts; SHA-1 is needed by the PKCS #11 spec.
 	_ "crypto/sha1"
 	_ "crypto/sha512"
 	"encoding/asn1"
@@ -111,14 +115,14 @@ type Signer struct {
 
 func newSigner(ctx context.Context, client *Client, config SignerConfig) (*Signer, error) {
 	if client == nil {
-		return nil, fmt.Errorf("pkcs11: signer client is required")
+		return nil, errors.New("pkcs11: signer client is required")
 	}
 	algorithm := config.Algorithm
 	if algorithm == "" {
 		algorithm = config.Private.Algorithm
 	}
 	if algorithm == "" {
-		return nil, fmt.Errorf("pkcs11: signer algorithm is required")
+		return nil, errors.New("pkcs11: signer algorithm is required")
 	}
 	public := config.Public
 	if public.Handle == 0 && public.ID == nil && public.Label == "" && public.UniqueID == "" {
@@ -178,7 +182,7 @@ func (s *Signer) SignMessageContext(ctx context.Context, message []byte, opts cr
 // crypto.MessageSigner complete-message contract.
 func (s *Signer) signInput(ctx context.Context, input []byte, opts crypto.SignerOpts, messageLevel bool) ([]byte, error) {
 	if s == nil || s.client == nil {
-		return nil, fmt.Errorf("pkcs11: signer is nil or closed")
+		return nil, errors.New("pkcs11: signer is nil or closed")
 	}
 	intent, err := s.signIntent(input, opts, messageLevel)
 	if err != nil {
@@ -370,7 +374,7 @@ func normalizeSignatureOptions(algorithm Algorithm, options SignatureOptions) (S
 		algorithm = options.Algorithm
 	}
 	if algorithm == "" {
-		return SignatureOptions{}, fmt.Errorf("pkcs11: signature algorithm is required")
+		return SignatureOptions{}, errors.New("pkcs11: signature algorithm is required")
 	}
 	options.Algorithm = algorithm
 	if options.Hash == 0 && (algorithm == AlgorithmRSA || algorithm == AlgorithmECDSAP256 || algorithm == AlgorithmECDSAP384 || algorithm == AlgorithmECDSAP521) {
@@ -381,10 +385,10 @@ func normalizeSignatureOptions(algorithm Algorithm, options SignatureOptions) (S
 	}
 	if options.ExternalMu {
 		if algorithm != AlgorithmMLDSA44 && algorithm != AlgorithmMLDSA65 && algorithm != AlgorithmMLDSA87 {
-			return SignatureOptions{}, fmt.Errorf("pkcs11: external mu is defined only for ML-DSA")
+			return SignatureOptions{}, errors.New("pkcs11: external mu is defined only for ML-DSA")
 		}
 		if options.Hash != 0 || options.Prehashed {
-			return SignatureOptions{}, fmt.Errorf("pkcs11: external mu cannot be combined with hash or prehash options")
+			return SignatureOptions{}, errors.New("pkcs11: external mu cannot be combined with hash or prehash options")
 		}
 	}
 	return options, nil
@@ -459,15 +463,15 @@ func (c *Client) sign(ctx context.Context, private ObjectRef, intent Intent, inp
 			}
 		}
 
-		handle, resolveErr := session.Resolve(private)
+		handle, resolveErr := session.Resolve(ctx, private)
 		if resolveErr != nil {
 			return resolveErr
 		}
-		if initErr := session.SignInit([]*raw.Mechanism{route.Mechanism}, handle); initErr != nil {
+		if initErr := session.SignInit(ctx, []*raw.Mechanism{route.Mechanism}, handle); initErr != nil {
 			session.MarkBroken()
 			return initErr
 		}
-		signature, err = session.Sign(input)
+		signature, err = session.Sign(ctx, input)
 		if err != nil {
 			session.MarkBroken()
 		}
@@ -492,7 +496,7 @@ func ecdsaRawToDER(signature []byte) ([]byte, error) {
 	r := new(big.Int).SetBytes(signature[:half])
 	s := new(big.Int).SetBytes(signature[half:])
 	if r.Sign() <= 0 || s.Sign() <= 0 {
-		return nil, fmt.Errorf("pkcs11: raw ECDSA signature contains a zero scalar")
+		return nil, errors.New("pkcs11: raw ECDSA signature contains a zero scalar")
 	}
 	return asn1.Marshal(struct{ R, S *big.Int }{r, s})
 }
@@ -504,7 +508,7 @@ func ecdsaDERToRaw(signature []byte, width int) ([]byte, error) {
 	rest, err := asn1.Unmarshal(signature, &value)
 	if err != nil || len(rest) != 0 || value.R == nil || value.S == nil {
 		if err == nil {
-			err = fmt.Errorf("invalid DER ECDSA signature")
+			err = errors.New("invalid DER ECDSA signature")
 		}
 		return nil, fmt.Errorf("pkcs11: decode ECDSA signature: %w", err)
 	}
@@ -574,7 +578,7 @@ func (c *Client) loadPublicKey(ctx context.Context, object ObjectRef, algorithm 
 		n := new(big.Int).SetBytes(byType[raw.CKA_MODULUS])
 		e := new(big.Int).SetBytes(byType[raw.CKA_PUBLIC_EXPONENT])
 		if n.Sign() == 0 || !e.IsInt64() || e.Int64() < 2 {
-			return nil, fmt.Errorf("pkcs11: invalid RSA public attributes")
+			return nil, errors.New("pkcs11: invalid RSA public attributes")
 		}
 		return &rsa.PublicKey{N: n, E: int(e.Int64())}, nil
 	case AlgorithmECDSAP256, AlgorithmECDSAP384, AlgorithmECDSAP521:
@@ -588,10 +592,12 @@ func (c *Client) loadPublicKey(ctx context.Context, object ObjectRef, algorithm 
 			curve = elliptic.P521()
 		}
 		point := unwrapOctetString(byType[raw.CKA_EC_POINT])
+		//nolint:staticcheck // CKA_EC_POINT is a raw uncompressed point; crypto/ecdh has no coordinate decode.
 		x, y := elliptic.Unmarshal(curve, point)
 		if x == nil {
-			return nil, fmt.Errorf("pkcs11: invalid EC point")
+			return nil, errors.New("pkcs11: invalid EC point")
 		}
+		//nolint:staticcheck // Building a public key from CKA_EC_POINT coordinates is intentional.
 		return &ecdsa.PublicKey{Curve: curve, X: x, Y: y}, nil
 	case AlgorithmEd25519:
 		point := unwrapOctetString(byType[raw.CKA_EC_POINT])
@@ -650,10 +656,7 @@ func (c *Client) Verify(ctx context.Context, public ObjectRef, data, signature [
 		}
 	}
 
-	idempotent := true
-	if route.Execution.Replay == RouteReplayNever {
-		idempotent = false
-	}
+	idempotent := route.Execution.Replay != RouteReplayNever
 	return c.withSession(ctx, sessionOptions{
 		Operation: "verify", ReadWrite: route.Execution.ReadWrite, Idempotent: idempotent,
 	}, func(session *sessionLease) error {
@@ -668,15 +671,15 @@ func (c *Client) Verify(ctx context.Context, public ObjectRef, data, signature [
 			}
 		}
 
-		handle, resolveErr := session.Resolve(public)
+		handle, resolveErr := session.Resolve(ctx, public)
 		if resolveErr != nil {
 			return resolveErr
 		}
-		if initErr := session.VerifyInit([]*raw.Mechanism{route.Mechanism}, handle); initErr != nil {
+		if initErr := session.VerifyInit(ctx, []*raw.Mechanism{route.Mechanism}, handle); initErr != nil {
 			session.MarkBroken()
 			return initErr
 		}
-		if verifyErr := session.Verify(data, signature); verifyErr != nil {
+		if verifyErr := session.Verify(ctx, data, signature); verifyErr != nil {
 			if !raw.IsError(verifyErr, raw.CKR_SIGNATURE_INVALID) {
 				session.MarkBroken()
 			}
@@ -725,7 +728,7 @@ func (d *Decrypter) Decrypt(randomSource io.Reader, ciphertext []byte, opts cryp
 // constant-behavior fallback requested by rsa.PKCS1v15DecryptOptions.
 func (d *Decrypter) DecryptContext(ctx context.Context, randomSource io.Reader, ciphertext []byte, opts crypto.DecrypterOpts) ([]byte, error) {
 	if d == nil || d.client == nil {
-		return nil, fmt.Errorf("pkcs11: decrypter is nil or closed")
+		return nil, errors.New("pkcs11: decrypter is nil or closed")
 	}
 	// Match crypto/rsa.PrivateKey.Decrypt: nil options select PKCS#1 v1.5,
 	// while OAEP is selected explicitly with *rsa.OAEPOptions.
@@ -738,6 +741,7 @@ func (d *Decrypter) DecryptContext(ctx context.Context, randomSource io.Reader, 
 			intent.Hash = value.Hash
 			intent.OAEPLabel = value.Label
 		}
+	//nolint:staticcheck // CKM_RSA_PKCS unwrap is a required PKCS #11 mechanism.
 	case *rsa.PKCS1v15DecryptOptions:
 		if value != nil {
 			sessionKeyLength = value.SessionKeyLen
@@ -773,15 +777,15 @@ func (d *Decrypter) DecryptContext(ctx context.Context, randomSource io.Reader, 
 	}
 	var plaintext []byte
 	err = d.client.withSession(ctx, sessionOptions{Operation: "decrypt"}, func(session *sessionLease) error {
-		handle, err := resolveObject(session, d.private)
+		handle, err := resolveObject(ctx, session, d.private)
 		if err != nil {
 			return err
 		}
-		if err := session.DecryptInit([]*raw.Mechanism{route.Mechanism}, handle); err != nil {
+		if err := session.DecryptInit(ctx, []*raw.Mechanism{route.Mechanism}, handle); err != nil {
 			session.MarkBroken()
 			return err
 		}
-		plaintext, err = session.Decrypt(ciphertext)
+		plaintext, err = session.Decrypt(ctx, ciphertext)
 		if err != nil && !isPKCS1PaddingError(err) {
 			session.MarkBroken()
 		}
@@ -835,6 +839,8 @@ func (c *Client) GenerateSigner(ctx context.Context, options KeyPairOptions, sig
 	return signer, pair, nil
 }
 
-var _ crypto.Signer = (*Signer)(nil)
-var _ crypto.MessageSigner = (*Signer)(nil)
-var _ crypto.Decrypter = (*Decrypter)(nil)
+var (
+	_ crypto.Signer        = (*Signer)(nil)
+	_ crypto.MessageSigner = (*Signer)(nil)
+	_ crypto.Decrypter     = (*Decrypter)(nil)
+)

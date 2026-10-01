@@ -29,7 +29,7 @@ func TestNativeBackendsRemainSeparated(t *testing.T) {
 		}
 		if entry.IsDir() {
 			switch entry.Name() {
-			case ".git", "reports":
+			case ".git", ".tool", "reports":
 				return filepath.SkipDir
 			}
 			return nil

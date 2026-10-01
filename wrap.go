@@ -2,7 +2,7 @@ package pkcs11
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"github.com/otpki/pkcs11/raw"
 )
@@ -27,24 +27,24 @@ type WrapOptions struct {
 // wrap even when the client receives a transport or session error afterward.
 func (c *Client) Wrap(ctx context.Context, wrappingKey, key ObjectRef, options WrapOptions) ([]byte, error) {
 	if options.Mechanism == nil {
-		return nil, fmt.Errorf("pkcs11: wrapping mechanism is required")
+		return nil, errors.New("pkcs11: wrapping mechanism is required")
 	}
 	var wrapped []byte
 	err := c.withSession(ctx, sessionOptions{Operation: "wrap-key"}, func(session *sessionLease) error {
-		wrappingHandle, err := resolveObject(session, wrappingKey)
+		wrappingHandle, err := resolveObject(ctx, session, wrappingKey)
 		if err != nil {
 			return err
 		}
-		keyHandle, err := resolveObject(session, key)
+		keyHandle, err := resolveObject(ctx, session, key)
 		if err != nil {
 			return err
 		}
 		// Resolve both durable references inside the same managed session because
 		// object handles are session/module-generation scoped.
 		if options.Authenticated {
-			wrapped, err = session.WrapKeyAuthenticated([]*raw.Mechanism{options.Mechanism}, wrappingHandle, keyHandle, options.AssociatedData)
+			wrapped, err = session.WrapKeyAuthenticated(ctx, []*raw.Mechanism{options.Mechanism}, wrappingHandle, keyHandle, options.AssociatedData)
 		} else {
-			wrapped, err = session.WrapKey([]*raw.Mechanism{options.Mechanism}, wrappingHandle, keyHandle)
+			wrapped, err = session.WrapKey(ctx, []*raw.Mechanism{options.Mechanism}, wrappingHandle, keyHandle)
 		}
 		if err != nil {
 			session.MarkBroken()
@@ -77,18 +77,18 @@ type UnwrapOptions struct {
 // object in the HSM, and automatically repeating it could create duplicates.
 func (c *Client) Unwrap(ctx context.Context, unwrappingKey ObjectRef, wrapped []byte, options UnwrapOptions) (ObjectRef, error) {
 	if options.Mechanism == nil {
-		return ObjectRef{}, fmt.Errorf("pkcs11: unwrapping mechanism is required")
+		return ObjectRef{}, errors.New("pkcs11: unwrapping mechanism is required")
 	}
 	var handle raw.ObjectHandle
 	err := c.withSession(ctx, sessionOptions{Operation: "unwrap-key", ReadWrite: true}, func(session *sessionLease) error {
-		unwrappingHandle, err := resolveObject(session, unwrappingKey)
+		unwrappingHandle, err := resolveObject(ctx, session, unwrappingKey)
 		if err != nil {
 			return err
 		}
 		if options.Authenticated {
-			handle, err = session.UnwrapKeyAuthenticated([]*raw.Mechanism{options.Mechanism}, unwrappingHandle, wrapped, options.Attributes, options.AssociatedData)
+			handle, err = session.UnwrapKeyAuthenticated(ctx, []*raw.Mechanism{options.Mechanism}, unwrappingHandle, wrapped, options.Attributes, options.AssociatedData)
 		} else {
-			handle, err = session.UnwrapKey([]*raw.Mechanism{options.Mechanism}, unwrappingHandle, wrapped, options.Attributes)
+			handle, err = session.UnwrapKey(ctx, []*raw.Mechanism{options.Mechanism}, unwrappingHandle, wrapped, options.Attributes)
 		}
 		if err != nil {
 			session.MarkBroken()

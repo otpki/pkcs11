@@ -559,7 +559,7 @@ func copyArtifact(ctx context.Context, container testcontainers.Container, sourc
 	if err != nil {
 		return err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	file, err := os.Create(destination)
 	if err != nil {
 		return err
@@ -574,7 +574,7 @@ func writeContainerLogs(ctx context.Context, container testcontainers.Container,
 	if err != nil {
 		return err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	file, err := os.Create(destination)
 	if err != nil {
 		return err

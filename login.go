@@ -2,7 +2,6 @@ package pkcs11
 
 import (
 	"context"
-
 	"sync"
 
 	"github.com/otpki/pkcs11/raw"

@@ -22,7 +22,10 @@ func TestNormalizeMechanismGeneratedIV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	params := adapted.Parameter.(*raw.GCMParams)
+	params, ok := adapted.Parameter.(*raw.GCMParams)
+	if !ok {
+		t.Fatalf("adapted parameter is %T, want *raw.GCMParams", adapted.Parameter)
+	}
 	if adapted.Mechanism != MechanismAESGCM || len(params.IV) != 12 || params.IVBits != 96 || params.TagBits != 128 {
 		t.Fatalf("adapted mechanism = %#v params=%#v", adapted, params)
 	}

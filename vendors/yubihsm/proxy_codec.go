@@ -2,7 +2,7 @@ package yubihsm
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 
 	"github.com/otpki/pkcs11/proxy"
 )
@@ -21,7 +21,7 @@ func (wrapFormatProxyCodec) Encode(value any) ([]byte, bool, error) {
 		format = typed
 	case *WrapFormat:
 		if typed == nil {
-			return nil, true, fmt.Errorf("yubihsm: nil wrap format")
+			return nil, true, errors.New("yubihsm: nil wrap format")
 		}
 		format = *typed
 	default:

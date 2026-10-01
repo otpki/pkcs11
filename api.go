@@ -2,6 +2,7 @@ package pkcs11
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/otpki/pkcs11/raw"
@@ -44,7 +45,7 @@ func (c *Client) FindOne(ctx context.Context, query ObjectQuery) (ObjectRef, err
 	}
 	switch len(objects) {
 	case 0:
-		return ObjectRef{}, fmt.Errorf("pkcs11: no object matches query")
+		return ObjectRef{}, errors.New("pkcs11: no object matches query")
 	case 1:
 		return objects[0], nil
 	default:
@@ -81,7 +82,7 @@ func (c *Client) FindKeyPair(ctx context.Context, locator KeyLocator) (KeyPair, 
 			}
 		}
 	}
-	privateClass := uint(raw.CKO_PRIVATE_KEY)
+	privateClass := raw.CKO_PRIVATE_KEY
 	private, err := c.FindOne(ctx, ObjectQuery{
 		Class: &privateClass,
 		Label: locator.Label,
@@ -97,7 +98,7 @@ func (c *Client) FindKeyPair(ctx context.Context, locator KeyLocator) (KeyPair, 
 	if algorithm == "" {
 		algorithm = private.Algorithm
 	}
-	publicClass := uint(raw.CKO_PUBLIC_KEY)
+	publicClass := raw.CKO_PUBLIC_KEY
 	// Tokens commonly populate CKA_ID on the private object even when lookup began
 	// with a label. Reuse the discovered ID to avoid selecting a same-label public key.
 	publicID := locator.ID

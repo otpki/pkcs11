@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -67,7 +68,7 @@ func main() {
 		Authorize: authorizeWorkload,
 	})
 	check(err)
-	defer func() { check(server.Close()) }()
+	defer func() { check(server.Close(ctx)) }()
 
 	log.Printf("client-activated proxy configured; server stores no HSM PIN")
 	go reportActivation(ctx, server, env("PKCS11_PROXY_ROUTE", "client-activated-utimaco"))
@@ -79,7 +80,7 @@ func main() {
 func workloadAuthenticator(expected string) proxy.Authenticator {
 	return func(_ context.Context, identity proxy.RequestIdentity) (string, error) {
 		if expected == "" || subtle.ConstantTimeCompare(identity.Auth, []byte(expected)) != 1 {
-			return "", fmt.Errorf("invalid workload credential")
+			return "", errors.New("invalid workload credential")
 		}
 		return "example-pki-workload", nil
 	}
@@ -109,7 +110,7 @@ func authorizeWorkload(_ context.Context, request proxy.AuthorizationRequest) er
 	// Deny destructive administration independently of ordinary HSM access.
 	switch request.Operation {
 	case "InitToken", "InitPIN", "SetPIN":
-		return fmt.Errorf("token administration is not permitted")
+		return errors.New("token administration is not permitted")
 	default:
 		return nil
 	}

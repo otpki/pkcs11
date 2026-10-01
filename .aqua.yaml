@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/aquaproj/aqua/main/json-schema/aqua-yaml.json
+
+# Dev tools for this repository, installed into .tool/ by `just tools` — see
+# Justfile. Versions are pinned to match CI (.github/workflows/ci.yml and
+# release.yml use the same tool versions).
+registries:
+  - type: standard
+    ref: v4.552.0 # renovate: depName=aquaproj/aqua-registry
+
+packages:
+  # .golangci.yml is written for the v2 config schema; keep in sync with the
+  # golangci-lint-action version in ci.yml.
+  - name: golangci/golangci-lint@v2.14.0
+  # Keep in sync with the govulncheck pin in ci.yml.
+  - name: golang/vuln/govulncheck@v1.1.4
+  # Cross-compiles release binaries and local multiarch Docker builds; keep in
+  # sync with setup-zig in release.yml and the Dockerfile builder stage.
+  - name: ziglang/zig@0.16.0

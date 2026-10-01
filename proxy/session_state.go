@@ -71,7 +71,7 @@ func (session *virtualSession) pinnedLeaseIs(lease *pkcs11.RawSessionLease) bool
 // beginPinnedUse borrows the current pinned lease for one native operation.
 // activeCalls prevents a concurrent cross-session object deletion from releasing
 // an otherwise idle lease between lookup and native execution.
-func (session *virtualSession) beginPinnedUse(target *brokerTarget) (*pkcs11.RawSessionLease, func() error, bool) {
+func (session *virtualSession) beginPinnedUse(ctx context.Context, target *brokerTarget) (*pkcs11.RawSessionLease, func() error, bool) {
 	session.lifetime.RLock()
 	if session.closed || session.lease == nil {
 		session.lifetime.RUnlock()
@@ -85,7 +85,7 @@ func (session *virtualSession) beginPinnedUse(target *brokerTarget) (*pkcs11.Raw
 		if remaining := session.activeCalls.Add(-1); remaining < 0 {
 			panic("pkcs11 proxy: physical session active-call accounting underflow")
 		}
-		return session.releaseIfIdle(target)
+		return session.releaseIfIdle(ctx, target)
 	}
 	return lease, finish, true
 }
@@ -95,7 +95,7 @@ func (session *virtualSession) beginPinnedUse(target *brokerTarget) (*pkcs11.Raw
 // must be called when non-nil; it ends the active-use guard and may return the
 // now-idle pinned lease to the physical pool.
 func (session *virtualSession) ensureLease(ctx context.Context, target *brokerTarget, operation string) (*pkcs11.RawSessionLease, bool, func() error, error) {
-	if lease, finish, ok := session.beginPinnedUse(target); ok {
+	if lease, finish, ok := session.beginPinnedUse(ctx, target); ok {
 		return lease, false, finish, nil
 	}
 
@@ -140,7 +140,7 @@ func (session *virtualSession) pin(target *brokerTarget, lease *pkcs11.RawSessio
 // session object, or in-flight call still depends on it. It intentionally does
 // not require session.mu so a cross-session object destruction can release the
 // owner without acquiring another logical session's operation lock.
-func (session *virtualSession) releaseIfIdle(target *brokerTarget) error {
+func (session *virtualSession) releaseIfIdle(ctx context.Context, target *brokerTarget) error {
 	if session.operationCount.Load() != 0 || session.affineObjects.Load() != 0 || session.activeCalls.Load() != 0 {
 		return nil
 	}
@@ -156,11 +156,7 @@ func (session *virtualSession) releaseIfIdle(target *brokerTarget) error {
 		session.pinnedCounted = false
 		target.releasePinned()
 	}
-	return lease.Close()
-}
-
-func (session *virtualSession) maybeRelease(target *brokerTarget) error {
-	return session.releaseIfIdle(target)
+	return lease.Close(ctx)
 }
 
 func (session *virtualSession) hasOperation(name string) bool {
@@ -189,7 +185,7 @@ func (session *virtualSession) clearOperationsLocked() {
 // or logical logout. The caller must hold session.mu. The lifetime write lock
 // waits for cross-session users of affine objects before the native session is
 // closed.
-func (session *virtualSession) cancelLeaseLocked(target *brokerTarget) {
+func (session *virtualSession) cancelLeaseLocked(ctx context.Context, target *brokerTarget) {
 	session.clearOperationsLocked()
 	session.affineObjects.Store(0)
 
@@ -205,16 +201,10 @@ func (session *virtualSession) cancelLeaseLocked(target *brokerTarget) {
 		target.releasePinned()
 	}
 	lease.MarkBroken()
-	_ = lease.Close()
+	_ = lease.Close(ctx)
 }
 
-func (session *virtualSession) cancelPinned(target *brokerTarget) {
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	session.cancelLeaseLocked(target)
-}
-
-func (session *virtualSession) close(target *brokerTarget) error {
+func (session *virtualSession) close(ctx context.Context, target *brokerTarget) error {
 	session.mu.Lock()
 	defer session.mu.Unlock()
 
@@ -242,22 +232,7 @@ func (session *virtualSession) close(target *brokerTarget) error {
 	if dirty {
 		lease.MarkBroken()
 	}
-	return lease.Close()
-}
-
-func (session *virtualSession) operationReady(descriptor operationDescriptor) bool {
-	if len(descriptor.Required) == 0 {
-		return true
-	}
-	if session.operations["restored-operation"] {
-		return true
-	}
-	for _, name := range descriptor.Required {
-		if !session.operations[name] {
-			return false
-		}
-	}
-	return true
+	return lease.Close(ctx)
 }
 
 func (session *virtualSession) startOperation(target *brokerTarget, name string, lease *pkcs11.RawSessionLease, mechanisms []*raw.Mechanism) error {
@@ -297,7 +272,7 @@ func (session *virtualSession) deleteOperationLocked(name string) {
 	}
 }
 
-func (session *virtualSession) cancelOperations(target *brokerTarget, names []string) ([]parameterUpdate, error) {
+func (session *virtualSession) cancelOperations(ctx context.Context, target *brokerTarget, names []string) ([]parameterUpdate, error) {
 	var updates []parameterUpdate
 	for _, name := range names {
 		for _, mechanism := range session.parameters[name] {
@@ -311,10 +286,10 @@ func (session *virtualSession) cancelOperations(target *brokerTarget, names []st
 		}
 		session.deleteOperationLocked(name)
 	}
-	return updates, session.releaseIfIdle(target)
+	return updates, session.releaseIfIdle(ctx, target)
 }
 
-func (session *virtualSession) finishOperation(target *brokerTarget, name string) ([]parameterUpdate, error) {
+func (session *virtualSession) finishOperation(ctx context.Context, target *brokerTarget, name string) ([]parameterUpdate, error) {
 	var updates []parameterUpdate
 	for _, mechanism := range session.parameters[name] {
 		if mechanism == nil {
@@ -326,5 +301,5 @@ func (session *virtualSession) finishOperation(target *brokerTarget, name string
 		}
 	}
 	session.deleteOperationLocked(name)
-	return updates, session.releaseIfIdle(target)
+	return updates, session.releaseIfIdle(ctx, target)
 }

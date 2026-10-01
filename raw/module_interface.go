@@ -60,7 +60,7 @@ type Module interface {
 	GetAttributeValue(session SessionHandle, object ObjectHandle, attributes []*Attribute) ([]*Attribute, error)
 	SetAttributeValue(session SessionHandle, object ObjectHandle, attributes []*Attribute) error
 	FindObjectsInit(session SessionHandle, attributes []*Attribute) error
-	FindObjects(session SessionHandle, max int) ([]ObjectHandle, bool, error)
+	FindObjects(session SessionHandle, maxObjects int) ([]ObjectHandle, bool, error)
 	FindObjectsFinal(session SessionHandle) error
 	FindAllObjects(session SessionHandle, attributes []*Attribute, batchSize int) ([]ObjectHandle, error)
 

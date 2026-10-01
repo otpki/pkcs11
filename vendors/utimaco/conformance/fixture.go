@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,7 +130,7 @@ func (f archiveFixture) Definition() containerfixture.Definition {
 // Prepare extracts the licensed runtime files into licensed/utimaco inside the
 // repository checkout so the Dockerfile can COPY them, then removes them again
 // during cleanup.
-func (f archiveFixture) Prepare(ctx context.Context, request containerfixture.Request) (prepared containerfixture.Prepared, returnedErr error) {
+func (f archiveFixture) Prepare(_ context.Context, request containerfixture.Request) (prepared containerfixture.Prepared, returnedErr error) {
 	definition, err := containerfixture.Validate(f.definition)
 	if err != nil {
 		return prepared, err
@@ -163,7 +164,7 @@ func (f archiveFixture) Prepare(ctx context.Context, request containerfixture.Re
 	}()
 
 	staged := 0
-	count, err := extractRules(assets["gp-archive"], gpRules, root, destination)
+	count, err := extractRules(assets["gp-archive"], gpRules, destination)
 	staged += count
 	if err != nil {
 		return prepared, fmt.Errorf("utimaco: stage GP archive: %w", err)
@@ -174,7 +175,7 @@ func (f archiveFixture) Prepare(ctx context.Context, request containerfixture.Re
 		simulatorRules = qpRules
 		archive = assets["qp-archive"]
 	}
-	count, err = extractRules(archive, simulatorRules, root, destination)
+	count, err = extractRules(archive, simulatorRules, destination)
 	staged += count
 	if err != nil {
 		return prepared, fmt.Errorf("utimaco: stage simulator: %w", err)
@@ -196,12 +197,12 @@ func (f archiveFixture) Prepare(ctx context.Context, request containerfixture.Re
 // extractRules copies archive members matching each rule's prefix into
 // destination. The archive's top-level bundle directory is stripped before
 // prefix matching so either zipped or pre-extracted release layouts work.
-func extractRules(archivePath string, rules []zipRule, root, destination string) (int, error) {
+func extractRules(archivePath string, rules []zipRule, destination string) (int, error) {
 	reader, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return 0, err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	written := 0
 	for _, file := range reader.File {
@@ -245,7 +246,7 @@ func extractMember(file *zip.File, target string) error {
 	if err != nil {
 		return err
 	}
-	defer source.Close()
+	defer func() { _ = source.Close() }()
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
@@ -281,11 +282,7 @@ func executableMode(file *zip.File) os.FileMode {
 
 func mergeEnvironment(base, overlay map[string]string) map[string]string {
 	result := make(map[string]string, len(base)+len(overlay))
-	for key, value := range base {
-		result[key] = value
-	}
-	for key, value := range overlay {
-		result[key] = value
-	}
+	maps.Copy(result, base)
+	maps.Copy(result, overlay)
 	return result
 }

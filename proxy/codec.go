@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -77,7 +78,7 @@ func NewCodecRegistry(codecs ...ParameterCodec) (*CodecRegistry, error) {
 		}
 		id := strings.TrimSpace(codec.ID())
 		if id == "" {
-			return nil, fmt.Errorf("pkcs11 proxy: parameter codec ID is required")
+			return nil, errors.New("pkcs11 proxy: parameter codec ID is required")
 		}
 		version := codec.Version()
 		if version == 0 {
@@ -228,7 +229,7 @@ func encodeParameter(value any, registry *CodecRegistry) (parameterValue, error)
 		}
 		return encodeJSONParameter(parameterHashSignContext, typed, true)
 	case raw.UnsafeParameter, *raw.UnsafeParameter:
-		return parameterValue{}, fmt.Errorf("pkcs11 proxy: UnsafeParameter cannot cross a process or ABI boundary")
+		return parameterValue{}, errors.New("pkcs11 proxy: UnsafeParameter cannot cross a process or ABI boundary")
 	}
 	// Vendor selectors are often named unsigned integer types whose native ABI is
 	// exactly one CK_ULONG. Preserve the semantic integer rather than requiring a
@@ -284,7 +285,7 @@ func decodeParameter(encoded parameterValue, registry *CodecRegistry) (any, erro
 		return append([]byte(nil), encoded.Data...), nil
 	case parameterUint:
 		if uint64(uint(encoded.Uint)) != encoded.Uint {
-			return nil, fmt.Errorf("pkcs11 proxy: uint parameter overflows this client")
+			return nil, errors.New("pkcs11 proxy: uint parameter overflows this client")
 		}
 		return uint(encoded.Uint), nil
 	case parameterPSS:

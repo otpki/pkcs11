@@ -96,6 +96,7 @@ func (b *NativeStructBuilder) AddByte(value byte) {
 	b.align(1)
 	b.root = append(b.root, value)
 }
+
 func (b *NativeStructBuilder) AddBool(value bool) {
 	if value {
 		b.AddByte(1)

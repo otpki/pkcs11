@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/asn1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -165,7 +166,7 @@ func (c *Client) Find(ctx context.Context, query ObjectQuery) ([]ObjectRef, erro
 		handles, ok := c.cache.getObjects(key, session.generation)
 		if !ok {
 			var err error
-			handles, err = session.FindAllObjects(queryTemplate(query), 64)
+			handles, err = session.FindAllObjects(ctx, queryTemplate(query), 64)
 			if err != nil {
 				return err
 			}
@@ -189,13 +190,13 @@ func (c *Client) Find(ctx context.Context, query ObjectQuery) ([]ObjectRef, erro
 				}
 			}
 			requested = mergeAttributes(requested)
-			attributes, attributeErr := session.GetAttributeValue(handle, requested)
+			attributes, attributeErr := session.GetAttributeValue(ctx, handle, requested)
 			if attributeErr != nil && len(attributes) == 0 {
 				// Utimaco's CXI layer answers a batched read with a device
 				// error when any property tag is unknown instead of reporting
 				// per-attribute failures, so retry attribute-by-attribute
 				// before giving up on the object.
-				attributes, attributeErr = readObjectAttributes(session, handle, requested)
+				attributes, attributeErr = readObjectAttributes(ctx, session, handle, requested)
 				if attributeErr != nil && len(attributes) == 0 {
 					return attributeErr
 				}
@@ -227,11 +228,11 @@ func (c *Client) Find(ctx context.Context, query ObjectQuery) ([]ObjectRef, erro
 // at a time. Providers that hard-fail a multi-attribute read on any unknown
 // property tag still answer each attribute separately under the ordinary
 // per-attribute error model.
-func readObjectAttributes(session *sessionLease, handle raw.ObjectHandle, requested []*raw.Attribute) ([]*raw.Attribute, error) {
+func readObjectAttributes(ctx context.Context, session *sessionLease, handle raw.ObjectHandle, requested []*raw.Attribute) ([]*raw.Attribute, error) {
 	var collected []*raw.Attribute
 	var firstErr error
 	for _, attribute := range requested {
-		values, err := session.GetAttributeValue(handle, []*raw.Attribute{attribute})
+		values, err := session.GetAttributeValue(ctx, handle, []*raw.Attribute{attribute})
 		collected = append(collected, values...)
 		if len(values) == 0 && firstErr == nil {
 			firstErr = err
@@ -391,10 +392,10 @@ func curveIdentifier(value []byte) string {
 // resolveObject prefers durable locators over a cached native handle. Handles are
 // scoped to a module/session generation and can become invalid after reconnect,
 // failover, token replacement, or provider-specific session behavior.
-func resolveObject(session *sessionLease, object ObjectRef) (raw.ObjectHandle, error) {
+func resolveObject(ctx context.Context, session *sessionLease, object ObjectRef) (raw.ObjectHandle, error) {
 	if object.ID == nil && object.Label == "" && object.UniqueID == "" {
 		if object.Handle == 0 {
-			return 0, fmt.Errorf("pkcs11: object has neither handle nor locator")
+			return 0, errors.New("pkcs11: object has neither handle nor locator")
 		}
 		return object.Handle, nil
 	}
@@ -416,7 +417,7 @@ func resolveObject(session *sessionLease, object ObjectRef) (raw.ObjectHandle, e
 		// Ask for more than one result so a non-unique locator fails loudly instead
 		// of selecting whichever handle the provider happens to enumerate first.
 		var err error
-		handles, err = session.FindAllObjects(queryTemplate(query), 8)
+		handles, err = session.FindAllObjects(ctx, queryTemplate(query), 8)
 		if err != nil {
 			return 0, err
 		}
@@ -460,11 +461,11 @@ func (c *Client) Attributes(ctx context.Context, object ObjectRef, requested ...
 			result = cached
 			return nil
 		}
-		handle, err := resolveObject(session, object)
+		handle, err := resolveObject(ctx, session, object)
 		if err != nil {
 			return err
 		}
-		result, err = session.GetAttributeValue(handle, requested)
+		result, err = session.GetAttributeValue(ctx, handle, requested)
 		if err == nil {
 			c.cache.putAttributes(cacheKey, session.generation, requested, result)
 		}
@@ -478,11 +479,11 @@ func (c *Client) Attributes(ctx context.Context, object ObjectRef, requested ...
 // the provider has committed the change.
 func (c *Client) SetAttributes(ctx context.Context, object ObjectRef, attributes ...*raw.Attribute) error {
 	return c.withSession(ctx, sessionOptions{Operation: "set-attributes", ReadWrite: true}, func(session *sessionLease) error {
-		handle, err := resolveObject(session, object)
+		handle, err := resolveObject(ctx, session, object)
 		if err != nil {
 			return err
 		}
-		return session.SetAttributeValue(handle, attributes)
+		return session.SetAttributeValue(ctx, handle, attributes)
 	})
 }
 
@@ -491,10 +492,10 @@ func (c *Client) SetAttributes(ctx context.Context, object ObjectRef, attributes
 // is indistinguishable from a failure before the object was removed.
 func (c *Client) Destroy(ctx context.Context, object ObjectRef) error {
 	return c.withSession(ctx, sessionOptions{Operation: "destroy-object", ReadWrite: true}, func(session *sessionLease) error {
-		handle, err := resolveObject(session, object)
+		handle, err := resolveObject(ctx, session, object)
 		if err != nil {
 			return err
 		}
-		return session.DestroyObject(handle)
+		return session.DestroyObject(ctx, handle)
 	})
 }

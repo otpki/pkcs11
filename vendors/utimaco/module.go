@@ -51,13 +51,11 @@ func Modules() []pkcs11.VendorModule { return []pkcs11.VendorModule{New()} }
 // conformance contract for the unified Utimaco module.
 func (*Module) Definition() pkcs11.VendorDefinition {
 	return pkcs11.VendorDefinition{
-		ID:       ID,
-		Name:     "Utimaco CryptoServer",
-		Priority: 120,
-		Source:   "Utimaco CryptoServer 6.4 and QuantumProtect 1.5 interface definitions",
-		MatchFunc: func(fingerprint pkcs11.Fingerprint) pkcs11.VendorMatch {
-			return matchUtimaco(fingerprint)
-		},
+		ID:        ID,
+		Name:      "Utimaco CryptoServer",
+		Priority:  120,
+		Source:    "Utimaco CryptoServer 6.4 and QuantumProtect 1.5 interface definitions",
+		MatchFunc: matchUtimaco,
 		Discovery: pkcs11.VendorDiscovery{
 			EnvironmentVariables: []string{"UTIMACO_PKCS11_MODULE", "CS_PKCS11_R3_LIB"},
 			ModuleNames: map[string][]string{
@@ -283,6 +281,7 @@ func (*Module) AdaptRoute(device pkcs11.Device, route pkcs11.Route) (pkcs11.Rout
 
 	set, err := parameterSet(route.Intent.Algorithm)
 	if err != nil {
+		//nolint:nilerr // An unknown parameter set means this route does not apply.
 		return route, nil
 	}
 
@@ -321,7 +320,7 @@ func (*Module) AdaptRoute(device pkcs11.Device, route pkcs11.Route) (pkcs11.Rout
 		route.Reasons = append(route.Reasons, "QuantumProtect u4u4v2* key-generation parameters")
 	case pkcs11.OperationSign, pkcs11.OperationVerify:
 		if len(route.Intent.Context) != 0 {
-			return route, fmt.Errorf("utimaco: direct QuantumProtect ML-DSA does not expose a context field; use a precomputed external mu")
+			return route, errors.New("utimaco: direct QuantumProtect ML-DSA does not expose a context field; use a precomputed external mu")
 		}
 		if route.Intent.Hedge != pkcs11.HedgePreferred {
 			return route, fmt.Errorf("utimaco: QuantumProtect ML-DSA does not expose hedge mode %d", route.Intent.Hedge)
@@ -332,7 +331,7 @@ func (*Module) AdaptRoute(device pkcs11.Device, route pkcs11.Route) (pkcs11.Rout
 		flags := uint32(0)
 		if route.Intent.Prehashed {
 			if route.Intent.Hash == 0 {
-				return route, fmt.Errorf("utimaco: ML-DSA prehash mode requires an explicit hash")
+				return route, errors.New("utimaco: ML-DSA prehash mode requires an explicit hash")
 			}
 			flags = MLDSAFlagPreHash
 		}
@@ -613,17 +612,17 @@ func hbsGenerationParameter(options pkcs11.KeyPairOptions) ([]byte, error) {
 			parameters = &pkcs11.HSSParameters{Levels: 1, LMSTypes: []uint{6}, LMOTSTypes: []uint{3}}
 		}
 		if parameters == nil {
-			return nil, fmt.Errorf("utimaco: HSS generation requires hierarchy parameters")
+			return nil, errors.New("utimaco: HSS generation requires hierarchy parameters")
 		}
 		levels := parameters.Levels
 		if levels == 0 {
 			levels = uint(len(parameters.LMSTypes))
 		}
 		if levels == 0 || levels > 8 || len(parameters.LMSTypes) != int(levels) || len(parameters.LMOTSTypes) != int(levels) {
-			return nil, fmt.Errorf("utimaco: HSS levels must match one to eight LMS and LM-OTS selectors")
+			return nil, errors.New("utimaco: HSS levels must match one to eight LMS and LM-OTS selectors")
 		}
 		if options.Algorithm == pkcs11.AlgorithmLMS && levels != 1 {
-			return nil, fmt.Errorf("utimaco: LMS requires exactly one level")
+			return nil, errors.New("utimaco: LMS requires exactly one level")
 		}
 		lms, err := byteSelectors(parameters.LMSTypes, "LMS")
 		if err != nil {
@@ -661,7 +660,7 @@ func hbsKeyTemplate(options pkcs11.KeyPairOptions) ([]*raw.Attribute, error) {
 		policy = *options.PrivatePolicy
 	}
 	if !policy.Sensitive || policy.Extractable {
-		return nil, fmt.Errorf("utimaco: stateful signature keys must be sensitive and non-extractable")
+		return nil, errors.New("utimaco: stateful signature keys must be sensitive and non-extractable")
 	}
 	attributes := []*raw.Attribute{
 		raw.NewAttribute(raw.CKA_CLASS, raw.CKO_SECRET_KEY),
@@ -697,7 +696,7 @@ func hbsKeyTemplate(options pkcs11.KeyPairOptions) ([]*raw.Attribute, error) {
 	class, classOK := pkcs11.AttributeULong(attributes, raw.CKA_CLASS)
 	keyType, keyTypeOK := pkcs11.AttributeULong(attributes, raw.CKA_KEY_TYPE)
 	if !classOK || class != raw.CKO_SECRET_KEY || !keyTypeOK || keyType != raw.CKK_GENERIC_SECRET {
-		return nil, fmt.Errorf("utimaco: HBS template cannot override CKA_CLASS or CKA_KEY_TYPE")
+		return nil, errors.New("utimaco: HBS template cannot override CKA_CLASS or CKA_KEY_TYPE")
 	}
 	return attributes, nil
 }
@@ -745,7 +744,7 @@ func (*Module) Verify(ctx context.Context, session pkcs11.VendorSession, object 
 }
 
 func withHBSPublicObject(ctx context.Context, session pkcs11.VendorSession, object pkcs11.ObjectRef, algorithm pkcs11.Algorithm, fn func(raw.Module, raw.SessionHandle, raw.ObjectHandle) error) error {
-	base, err := session.Resolve(object)
+	base, err := session.Resolve(ctx, object)
 	if err != nil {
 		return err
 	}
@@ -886,7 +885,7 @@ func (m *Module) Decapsulate(ctx context.Context, session pkcs11.VendorSession, 
 	if err != nil {
 		return pkcs11.ObjectRef{}, true, err
 	}
-	baseKey, err := session.Resolve(privateKey)
+	baseKey, err := session.Resolve(ctx, privateKey)
 	if err != nil {
 		return pkcs11.ObjectRef{}, true, err
 	}
@@ -925,7 +924,7 @@ func customDataForObject(ctx context.Context, session pkcs11.VendorSession, obje
 		if err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("utimaco: public-data lookup requires a durable object locator")
+		return nil, errors.New("utimaco: public-data lookup requires a durable object locator")
 	}
 	private := object
 	private.Handle = 0
@@ -938,7 +937,7 @@ func customDataForObject(ctx context.Context, session pkcs11.VendorSession, obje
 }
 
 func customData(ctx context.Context, session pkcs11.VendorSession, object pkcs11.ObjectRef) ([]byte, error) {
-	handle, err := session.Resolve(object)
+	handle, err := session.Resolve(ctx, object)
 	if err != nil {
 		return nil, err
 	}
@@ -959,7 +958,7 @@ func readCustomData(module raw.Module, session raw.SessionHandle, object raw.Obj
 	if err != nil {
 		return nil, err
 	}
-	return nil, fmt.Errorf("utimaco: CKA_UTI_CUSTOM_DATA is unavailable")
+	return nil, errors.New("utimaco: CKA_UTI_CUSTOM_DATA is unavailable")
 }
 
 func attributeBytes(attributes []*raw.Attribute, typ uint) []byte {

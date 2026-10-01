@@ -8,11 +8,11 @@ routing, and optional HSM vendor adaptation.
 This project deliberately separates the driver code from the provider code.
 
 | Package                                      | Purpose                                                                                                                      |
-|----------------------------------------------|------------------------------------------------------------------------------------------------------------------------------|
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `github.com/otpki/pkcs11`                    | High-level token API: keys, signers, ciphers, KEM, objects, certificates, health, discovery, and managed raw escape hatches. |
 | `github.com/otpki/pkcs11/raw`                | Complete low-level PKCS #11 3.2 ABI.                                                                                         |
 | `github.com/otpki/pkcs11/proxy`              | Direct Go remote module and multi target HSM broker.                                                                         |
-| `github.com/otpki/pkcs11/vendors/<provider>` | One isolated `VendorModule` implementation, public/vendor ABI definitions, tests, and optional simulator fixture.   |
+| `github.com/otpki/pkcs11/vendors/<provider>` | One isolated `VendorModule` implementation, public/vendor ABI definitions, tests, and optional simulator fixture.            |
 | `github.com/otpki/pkcs11/vendorkit`          | Helpers for vendor modules.                                                                                                  |
 | `github.com/otpki/pkcs11/vendortest`         | Reusable contract tests for vendor modules.                                                                                  |
 | `github.com/otpki/pkcs11/conformance`        | Manifest-driven portable and provider-extended conformance runner.                                                           |
@@ -54,6 +54,14 @@ and ABI layout are validated. The selected "transport" is available through
 Removing cgo from the Go executable does not make the vendor library portable.
 For example, a glibc-only Linux module still requires glibc, and an amd64-only
 simulator still requires an amd64 runtime or emulation.
+
+## Development tools
+
+Contributors need only `just` and `curl` on PATH; everything else is pinned and
+installed locally. `just tools` bootstraps aqua into `.tool/` (no global
+install), then resolves `golangci-lint`, `govulncheck`, and `zig` at the same
+versions CI uses. `just check` mirrors the CI quality gate locally: format,
+lint, tidy, `go generate`, and a clean working tree.
 
 ## PKCS #11 3.2 and PQC
 
@@ -186,9 +194,11 @@ coordinated physical login state.
 
 ```go
 remote := proxy.RemoteModule(proxy.Target{
-    ConfigID:          "key-storage-config-6f97",
-    Revision:          "database-row-version-42",
-    Endpoint:          "pkcs11-proxy.pki.svc.cluster.local:9443",
+    ConfigID: "key-storage-config-6f97",
+    Revision: "database-row-version-42",
+    // Every directly reachable replica; each logical client rendezvous-pins
+    // one for its whole lifetime.
+    Endpoints:         []string{"pkcs11-proxy-0.pki.svc:9443", "pkcs11-proxy-1.pki.svc:9443"},
     Route:             "production-hsm-a",
     SecurityContextID: "pki-workload-mtls-v3",
     TLS:               clientTLS,
@@ -206,7 +216,7 @@ client, err := pkcs11.Open(ctx, pkcs11.Config{
 Remote configuration is immutable and can come directly from a database. No
 environment variable, client configuration file, persistent socket, or native
 proxy shim is required. One server route is the authoritative governor for a
-finite HSM session budget even when, for example, a Kubernetes application 
+finite HSM session budget even when, for example, a Kubernetes application
 scales to many replicas.
 
 The server does not have to be provisioned with the HSM PIN. In
@@ -217,3 +227,16 @@ short-lived PIN through the ordinary managed `PINProvider` and `Client.Activate`
 is never retained for recovery, so a lost activation fails closed and requires
 a fresh audited client activation. Transport authentication and target
 authorization remain separate requirements.
+
+Both ends emit OpenTelemetry `pkcs11_proxy_*` metrics, request spans, and log
+records through the global providers — no exporter dependency in the library,
+and the `pkcs11-proxy` command wires OTLP/HTTP export, non-blocking slog
+application logs, and an Ed25519-signed audit log (`ServerConfig.Audit` for
+embedders). See `docs/PROXY.md` for the metric contract and audit format.
+
+The generated CLI reference lives in
+[`docs/cli/`](docs/cli/pkcs11-proxy.md) — and since every `pkcs11-proxy serve`
+flag is spelled exactly like its YAML key and `PKCS11_PROXY_*` env var,
+[`pkcs11-proxy serve`](docs/cli/pkcs11-proxy_serve.md) doubles as the complete
+broker configuration reference (`go generate ./cmd/pkcs11-proxy` regenerates
+it).

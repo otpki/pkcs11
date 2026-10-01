@@ -130,6 +130,7 @@ type sessionLease struct {
 	// generation must still match the module when the lease is returned.
 	generation uint64
 	// ctx is the acquisition context used by managed calls and hooks.
+	//nolint:containedctx // A lease owns its acquisition context as the fallback for ctx-less calls.
 	ctx context.Context
 	// operation and attempt are populated by Client.withSession for observability.
 	operation string
@@ -163,12 +164,14 @@ func (s *sessionLease) Raw() raw.Module {
 // module serialization and OS-thread-affinity policy. Returning a PKCS #11
 // session/device error marks the session broken when the managed retry
 // classifier says that the native handle cannot safely be reused.
+//
+//nolint:contextcheck // Nil callers intentionally fall back to the lease's context.
 func (s *sessionLease) DoRaw(ctx context.Context, fn func(raw.Module, raw.SessionHandle) error) error {
 	if s == nil || s.pool == nil || s.closed.Load() {
 		return errors.New("pkcs11: session is closed")
 	}
 	if fn == nil {
-		return fmt.Errorf("pkcs11: nil raw callback")
+		return errors.New("pkcs11: nil raw callback")
 	}
 	if ctx == nil {
 		ctx = s.Context()
@@ -226,13 +229,13 @@ func (s *sessionLease) Context() context.Context {
 
 // Close releases exclusive ownership of the lease. Healthy sessions are pooled;
 // broken, stale, or closing sessions are closed natively. Close is idempotent.
-func (s *sessionLease) Close() error {
+func (s *sessionLease) Close(ctx context.Context) error {
 	if s == nil || s.pool == nil {
 		return nil
 	}
 	s.once.Do(func() {
 		s.closed.Store(true)
-		s.closeErr = s.pool.release(pooledSession{handle: s.handle, generation: s.generation, lastUsed: time.Now(), worker: s.worker, authentication: s.authentication, openedAt: s.openedAt, uses: s.uses.Load()}, s.broken.Load())
+		s.closeErr = s.pool.release(ctx, pooledSession{handle: s.handle, generation: s.generation, lastUsed: time.Now(), worker: s.worker, authentication: s.authentication, openedAt: s.openedAt, uses: s.uses.Load()}, s.broken.Load())
 	})
 	return s.closeErr
 }
@@ -242,19 +245,19 @@ func (s *sessionLease) Close() error {
 // or Activate is called.
 func newSessionPool(config sessionPoolConfig) (*sessionPool, error) {
 	if config.Module == nil {
-		return nil, fmt.Errorf("pkcs11: session pool module is required")
+		return nil, errors.New("pkcs11: session pool module is required")
 	}
 	if config.Pool == (poolConfig{}) {
 		config.Pool = defaultPoolConfig()
 	}
 	// Resolve the maximum in descending order of application intent, adapter
 	// safety limit, and the driver's conservative fallback.
-	max := config.Pool.MaxSessions
-	if max <= 0 {
-		max = config.Device.plan.sessions.max
+	maxSessions := config.Pool.MaxSessions
+	if maxSessions <= 0 {
+		maxSessions = config.Device.plan.sessions.max
 	}
-	if max <= 0 {
-		max = 16
+	if maxSessions <= 0 {
+		maxSessions = 16
 	}
 	// Token limits are authoritative when available. PKCS #11 uses zero or
 	// CK_UNAVAILABLE_INFORMATION when a useful bound is not reported.
@@ -262,31 +265,25 @@ func newSessionPool(config sessionPoolConfig) (*sessionPool, error) {
 	if config.ReadWrite && config.Device.Fingerprint.Token.MaxRwSessionCount != 0 && config.Device.Fingerprint.Token.MaxRwSessionCount != raw.CK_UNAVAILABLE_INFORMATION {
 		tokenMax = config.Device.Fingerprint.Token.MaxRwSessionCount
 	}
-	if tokenMax != 0 && tokenMax != raw.CK_UNAVAILABLE_INFORMATION && uint(max) > tokenMax {
-		max = int(tokenMax)
+	if tokenMax != 0 && tokenMax != raw.CK_UNAVAILABLE_INFORMATION && uint(maxSessions) > tokenMax {
+		maxSessions = int(tokenMax)
 	}
 	if config.Device.plan.sessions.forceSerial {
 		// Some smart-card and legacy modules cannot safely support more than one
 		// live session even when their token metadata claims otherwise.
-		max = 1
+		maxSessions = 1
 	}
-	if max < 1 {
-		max = 1
+	if maxSessions < 1 {
+		maxSessions = 1
 	}
-	min := config.Pool.MinSessions
-	if min < 0 {
-		min = 0
-	}
-	if min > max {
-		min = max
-	}
-	flags := uint(raw.CKF_SERIAL_SESSION)
+	minSessions := min(max(config.Pool.MinSessions, 0), maxSessions)
+	flags := raw.CKF_SERIAL_SESSION
 	if config.ReadWrite {
 		flags |= raw.CKF_RW_SESSION
 	}
 	if config.Async {
 		if !config.Device.Capabilities.AsyncSessions {
-			return nil, fmt.Errorf("pkcs11: token does not advertise asynchronous sessions")
+			return nil, errors.New("pkcs11: token does not advertise asynchronous sessions")
 		}
 		flags |= raw.CKF_ASYNC_SESSION
 	}
@@ -295,7 +292,7 @@ func newSessionPool(config sessionPoolConfig) (*sessionPool, error) {
 	if mode == "" {
 		mode = LoginLazy
 	}
-	pool := &sessionPool{owner: config.Owner, module: config.Module, device: config.Device, flags: flags, readWrite: config.ReadWrite, userType: userType, username: config.Username, pin: config.PIN, loginMode: mode, protectedPath: config.ProtectedAuthenticationPath, max: max, min: min, idleTimeout: config.Pool.IdleTimeout, maxLifetime: config.Pool.MaxLifetime, maxOperations: config.Pool.MaxOperations, sem: make(chan struct{}, max), idle: make(chan pooledSession, max), hooks: config.Hooks, limiter: config.Limiter}
+	pool := &sessionPool{owner: config.Owner, module: config.Module, device: config.Device, flags: flags, readWrite: config.ReadWrite, userType: userType, username: config.Username, pin: config.PIN, loginMode: mode, protectedPath: config.ProtectedAuthenticationPath, max: maxSessions, min: minSessions, idleTimeout: config.Pool.IdleTimeout, maxLifetime: config.Pool.MaxLifetime, maxOperations: config.Pool.MaxOperations, sem: make(chan struct{}, maxSessions), idle: make(chan pooledSession, maxSessions), hooks: config.Hooks, limiter: config.Limiter}
 	pool.drained = sync.NewCond(&pool.mu)
 	if mode == LoginLazy || mode == LoginEager {
 		pool.activeLogin.Store(true)
@@ -312,11 +309,11 @@ func (p *sessionPool) currentDevice() Device {
 
 // SetDevice installs a rediscovered device snapshot and invalidates all idle
 // sessions because their adapter plan or slot generation may no longer apply.
-func (p *sessionPool) SetDevice(device Device) {
+func (p *sessionPool) SetDevice(ctx context.Context, device Device) {
 	p.deviceMu.Lock()
 	p.device = device
 	p.deviceMu.Unlock()
-	p.Invalidate()
+	p.Invalidate(ctx)
 }
 
 // MaxSessions returns the resolved maximum number of concurrently leased
@@ -364,7 +361,7 @@ func (p *sessionPool) warm(ctx context.Context, target int) error {
 		s, err := p.Acquire(ctx)
 		if err != nil {
 			for _, opened := range sessions {
-				_ = opened.Close()
+				_ = opened.Close(ctx)
 			}
 			return err
 		}
@@ -372,7 +369,7 @@ func (p *sessionPool) warm(ctx context.Context, target int) error {
 	}
 	var errs []error
 	for _, s := range sessions {
-		if err := s.Close(); err != nil {
+		if err := s.Close(ctx); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -405,6 +402,8 @@ func (p *sessionPool) endDeactivate(restoreAutomaticLogin bool) {
 
 // waitDrained waits until all checked-out leases return. It uses a bounded poll
 // so context cancellation is observed even though sync.Cond has no context API.
+//
+//nolint:contextcheck // Nil callers intentionally fall back to a detached context.
 func (p *sessionPool) waitDrained(ctx context.Context) error {
 	if p == nil {
 		return nil
@@ -439,11 +438,11 @@ func (p *sessionPool) takeIdleForDeactivate(ctx context.Context) (pooledSession,
 	select {
 	case item := <-p.idle:
 		if err := p.module.acquireLease(); err != nil {
-			_ = p.closeHandle(item)
+			_ = p.closeHandle(ctx, item)
 			return pooledSession{}, nil, false, err
 		}
 		cleanup := func() error {
-			err := p.closeHandle(item)
+			err := p.closeHandle(ctx, item)
 			p.module.releaseLease()
 			return err
 		}
@@ -498,7 +497,7 @@ func (p *sessionPool) Acquire(ctx context.Context) (*sessionLease, error) {
 				(p.idleTimeout > 0 && time.Since(item.lastUsed) > p.idleTimeout) ||
 				(p.maxLifetime > 0 && !item.openedAt.IsZero() && time.Since(item.openedAt) > p.maxLifetime) ||
 				(p.maxOperations > 0 && item.uses >= p.maxOperations) {
-				p.closeHandle(item)
+				_ = p.closeHandle(ctx, item)
 				continue
 			}
 		default:
@@ -515,7 +514,7 @@ func (p *sessionPool) Acquire(ctx context.Context) (*sessionLease, error) {
 	p.mu.Lock()
 	if p.closed.Load() || p.deactivating.Load() {
 		p.mu.Unlock()
-		_ = p.closeHandle(item)
+		_ = p.closeHandle(ctx, item)
 		<-p.sem
 		if p.deactivating.Load() {
 			return nil, errors.New("pkcs11: session pool is deactivating")
@@ -578,7 +577,7 @@ func (p *sessionPool) openHandle(ctx context.Context, login bool) (pooledSession
 	ok := false
 	defer func() {
 		if !ok {
-			_ = p.closeHandle(item)
+			_ = p.closeHandle(ctx, item)
 		}
 	}()
 	if login && p.activeLogin.Load() && p.loginMode != LoginNone {
@@ -634,7 +633,7 @@ func (p *sessionPool) ContextLogin(ctx context.Context, handle raw.SessionHandle
 
 // release returns one checked-out session. It releases accounting and the module
 // lease exactly once, then either queues or closes the native handle.
-func (p *sessionPool) release(item pooledSession, broken bool) error {
+func (p *sessionPool) release(ctx context.Context, item pooledSession, broken bool) error {
 	defer p.module.releaseLease()
 	p.mu.Lock()
 	if p.active > 0 {
@@ -649,25 +648,27 @@ func (p *sessionPool) release(item pooledSession, broken bool) error {
 		(p.maxLifetime > 0 && !item.openedAt.IsZero() && time.Since(item.openedAt) > p.maxLifetime) ||
 		(p.maxOperations > 0 && item.uses >= p.maxOperations) {
 		// Never return a possibly invalid handle to another caller.
-		return p.closeHandle(item)
+		return p.closeHandle(ctx, item)
 	}
 	item.lastUsed = time.Now()
 	select {
 	case p.idle <- item:
 		return nil
 	default:
-		return p.closeHandle(item)
+		return p.closeHandle(ctx, item)
 	}
 }
 
 // closeHandle closes the native handle on its owning worker, stops that worker,
 // and updates pool ownership accounting. Already-invalid handles are harmless.
-func (p *sessionPool) closeHandle(item pooledSession) error {
+// Cleanup must complete even when the caller's context is canceled, so the
+// context is detached from cancellation while keeping its values for hooks.
+func (p *sessionPool) closeHandle(ctx context.Context, item pooledSession) error {
 	if item.handle == 0 {
 		item.worker.close()
 		return nil
 	}
-	err := p.execute(context.Background(), item.worker, func(module raw.Module) error { return module.CloseSession(item.handle) })
+	err := p.execute(context.WithoutCancel(ctx), item.worker, func(module raw.Module) error { return module.CloseSession(item.handle) })
 	item.worker.close()
 	p.mu.Lock()
 	if p.opened > 0 {
@@ -683,14 +684,14 @@ func (p *sessionPool) closeHandle(item pooledSession) error {
 
 // Invalidate closes every idle session immediately. Checked-out sessions remain
 // protected by their leases and are rejected from the pool when later released.
-func (p *sessionPool) Invalidate() {
+func (p *sessionPool) Invalidate(ctx context.Context) {
 	if p == nil {
 		return
 	}
 	for {
 		select {
 		case item := <-p.idle:
-			_ = p.closeHandle(item)
+			_ = p.closeHandle(ctx, item)
 		default:
 			return
 		}
@@ -699,7 +700,7 @@ func (p *sessionPool) Invalidate() {
 
 // Close prevents new acquisitions, closes idle handles, and waits for every
 // checked-out lease to return before reporting completion. It is idempotent.
-func (p *sessionPool) Close() error {
+func (p *sessionPool) Close(ctx context.Context) error {
 	if p == nil || !p.closed.CompareAndSwap(false, true) {
 		return nil
 	}
@@ -707,7 +708,7 @@ func (p *sessionPool) Close() error {
 	for {
 		select {
 		case item := <-p.idle:
-			if err := p.closeHandle(item); err != nil {
+			if err := p.closeHandle(ctx, item); err != nil {
 				errs = append(errs, err)
 			}
 		default:

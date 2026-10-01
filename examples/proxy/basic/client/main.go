@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	pkcs11 "github.com/otpki/pkcs11"
@@ -18,6 +19,15 @@ import (
 )
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Fatal(r)
+		}
+	}()
+	run()
+}
+
+func run() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
@@ -25,7 +35,7 @@ func main() {
 	target := proxy.Target{
 		ConfigID:          "example-database-row",
 		Revision:          env("PKCS11_PROXY_REVISION", "example-v1"),
-		Endpoint:          env("PKCS11_PROXY_ENDPOINT", "127.0.0.1:9443"),
+		Endpoints:         strings.Split(env("PKCS11_PROXY_ENDPOINTS", env("PKCS11_PROXY_ENDPOINT", "127.0.0.1:9443")), ","),
 		Route:             env("PKCS11_PROXY_ROUTE", "example-hsm"),
 		SecurityContextID: "insecure-local-development-v1",
 		AllowInsecure:     true, // Development only: set TLS for production.
@@ -73,7 +83,7 @@ func main() {
 	log.Printf("Utimaco ML-DSA signature=%d bytes", len(signature))
 	check(client.Destroy(ctx, pair.Private))
 	check(client.Destroy(ctx, pair.Public))
-	check(client.Close())
+	check(client.Close(ctx))
 
 	// proxy.Open returns a proxy.Client implementing every raw.Module method.
 	// Direct raw consumers explicitly initialize, select slots, and own sessions.
@@ -85,7 +95,7 @@ func main() {
 	slots, err := module.GetSlotList(true)
 	check(err)
 	if len(slots) == 0 {
-		log.Fatal("remote target has no token-present slots")
+		panic("remote target has no token-present slots")
 	}
 	session, err := module.OpenSession(slots[0], raw.CKF_SERIAL_SESSION)
 	check(err)
@@ -106,6 +116,6 @@ func env(name, fallback string) string {
 
 func check(err error) {
 	if err != nil {
-		log.Fatal(fmt.Errorf("proxy client failed: %w", err))
+		panic(fmt.Errorf("proxy client failed: %w", err))
 	}
 }

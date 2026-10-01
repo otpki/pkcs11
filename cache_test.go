@@ -1,9 +1,10 @@
 package pkcs11
 
 import (
-	"github.com/otpki/pkcs11/raw"
 	"testing"
 	"time"
+
+	"github.com/otpki/pkcs11/raw"
 )
 
 func TestDefaultAttributeCachePolicy(t *testing.T) {

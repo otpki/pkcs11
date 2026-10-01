@@ -13,6 +13,15 @@ import (
 )
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Fatal(r)
+		}
+	}()
+	run()
+}
+
+func run() {
 	// raw.Open selects the best available interface (3.2 first) and native
 	// backend. Options can require a named interface/version when necessary.
 	module, err := raw.Open(os.Getenv("PKCS11_MODULE"))
@@ -33,7 +42,7 @@ func main() {
 	slots, err := module.GetSlotList(true)
 	check(err)
 	if len(slots) == 0 {
-		log.Fatal("no token-present slots")
+		panic("no token-present slots")
 	}
 	slot := slots[0]
 	token, err := module.GetTokenInfo(slot)
@@ -90,7 +99,7 @@ func main() {
 	plaintext, err := module.Decrypt(session, ciphertext)
 	check(err)
 	if !bytes.Equal(plaintext, []byte("raw plaintext")) {
-		log.Fatal("AES-GCM round trip changed the plaintext")
+		panic("AES-GCM round trip changed the plaintext")
 	}
 
 	// FindAllObjects wraps the mandatory Init/Find/Final sequence. Attribute
@@ -109,6 +118,6 @@ func main() {
 
 func check(err error) {
 	if err != nil {
-		log.Fatal(fmt.Errorf("raw example failed: %w", err))
+		panic(fmt.Errorf("raw example failed: %w", err))
 	}
 }

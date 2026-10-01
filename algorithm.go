@@ -3,6 +3,7 @@ package pkcs11
 import (
 	"crypto"
 	"encoding/asn1"
+	"errors"
 	"fmt"
 	"math/big"
 	"slices"
@@ -581,7 +582,7 @@ func pqcHashMechanism(hash crypto.Hash, slh bool) (uint, error) {
 
 func resolvePQCSignature(hash crypto.Hash, prehashed, slh bool, hedge HedgeMode, context []byte) (uint, string, any, error) {
 	if prehashed && hash == 0 {
-		return 0, "", nil, fmt.Errorf("pkcs11: PQC prehash routing requires an explicit hash")
+		return 0, "", nil, errors.New("pkcs11: PQC prehash routing requires an explicit hash")
 	}
 	pure, externallyHashed, alias := raw.CKM_ML_DSA, raw.CKM_HASH_ML_DSA, "ml-dsa"
 	if slh {
@@ -678,13 +679,14 @@ func ResolveRoute(device Device, intent Intent) (Route, error) {
 	aliasOnly := false
 	switch intent.Operation {
 	case OperationGenerate:
-		if spec.KeyPair {
+		switch {
+		case spec.KeyPair:
 			standard, alias, flag = spec.KeyPairMechanism, spec.KeyPairAlias, raw.CKF_GENERATE_KEY_PAIR
 			aliasOnly = !spec.KeyPairMechanismSet
-		} else if spec.Secret {
+		case spec.Secret:
 			standard, alias, flag = spec.SecretKeyMechanism, spec.SecretKeyAlias, raw.CKF_GENERATE
 			aliasOnly = !spec.SecretKeyMechanismSet
-		} else {
+		default:
 			return Route{}, fmt.Errorf("pkcs11: %s cannot be generated", intent.Algorithm)
 		}
 	case OperationSign, OperationVerify:
@@ -752,7 +754,7 @@ func ResolveRoute(device Device, intent Intent) (Route, error) {
 		case AlgorithmMLDSA44, AlgorithmMLDSA65, AlgorithmMLDSA87:
 			if intent.ExternalMu {
 				if intent.Hash != 0 || intent.Prehashed {
-					return Route{}, fmt.Errorf("pkcs11: external mu cannot be combined with hash or prehash routing")
+					return Route{}, errors.New("pkcs11: external mu cannot be combined with hash or prehash routing")
 				}
 				alias, aliasOnly = "ml-dsa-external-mu", true
 				parameter = intent.MechanismParameter
@@ -796,7 +798,7 @@ func ResolveRoute(device Device, intent Intent) (Route, error) {
 			}
 		case AlgorithmXMSS:
 			if intent.Hash != 0 || intent.Prehashed || intent.ExternalMu {
-				return Route{}, fmt.Errorf("pkcs11: XMSS signs messages directly; hash, prehash, and external-mu routing are not defined")
+				return Route{}, errors.New("pkcs11: XMSS signs messages directly; hash, prehash, and external-mu routing are not defined")
 			}
 			standard, alias = raw.CKM_XMSS, "xmss"
 			if intent.Operation == OperationVerify {
@@ -804,37 +806,40 @@ func ResolveRoute(device Device, intent Intent) (Route, error) {
 			}
 		case AlgorithmXMSSMT:
 			if intent.Hash != 0 || intent.Prehashed || intent.ExternalMu {
-				return Route{}, fmt.Errorf("pkcs11: XMSSMT signs messages directly; hash, prehash, and external-mu routing are not defined")
+				return Route{}, errors.New("pkcs11: XMSSMT signs messages directly; hash, prehash, and external-mu routing are not defined")
 			}
 			standard, alias = raw.CKM_XMSSMT, "xmssmt"
 			if intent.Operation == OperationVerify {
 				alias = "xmssmt-verify"
 			}
 		default:
-			if len(spec.SignMechanisms) != 0 {
+			switch {
+			case len(spec.SignMechanisms) != 0:
 				standard, alias = spec.SignMechanisms[0], string(intent.Algorithm)
-			} else if spec.SignAlias != "" {
+			case spec.SignAlias != "":
 				alias, aliasOnly = spec.SignAlias, true
-			} else {
+			default:
 				return Route{}, fmt.Errorf("pkcs11: %s does not support signing", intent.Algorithm)
 			}
 		}
 	case OperationEncapsulate:
 		flag = raw.CKF_ENCAPSULATE
-		if len(spec.KEMMechanisms) != 0 {
+		switch {
+		case len(spec.KEMMechanisms) != 0:
 			standard, alias = spec.KEMMechanisms[0], "ml-kem-encapsulate"
-		} else if spec.KEMAlias != "" {
+		case spec.KEMAlias != "":
 			alias, aliasOnly = spec.KEMAlias, true
-		} else {
+		default:
 			return Route{}, fmt.Errorf("pkcs11: %s is not a KEM", intent.Algorithm)
 		}
 	case OperationDecapsulate:
 		flag = raw.CKF_DECAPSULATE
-		if len(spec.KEMMechanisms) != 0 {
+		switch {
+		case len(spec.KEMMechanisms) != 0:
 			standard, alias = spec.KEMMechanisms[0], "ml-kem-decapsulate"
-		} else if spec.KEMAlias != "" {
+		case spec.KEMAlias != "":
 			alias, aliasOnly = spec.KEMAlias, true
-		} else {
+		default:
 			return Route{}, fmt.Errorf("pkcs11: %s is not a KEM", intent.Algorithm)
 		}
 	case OperationEncrypt, OperationDecrypt:
@@ -842,7 +847,8 @@ func ResolveRoute(device Device, intent Intent) (Route, error) {
 		if intent.Operation == OperationDecrypt {
 			flag = raw.CKF_DECRYPT
 		}
-		if intent.Algorithm == AlgorithmRSA {
+		switch {
+		case intent.Algorithm == AlgorithmRSA:
 			padding := intent.RSAPadding
 			if padding == "" {
 				padding = RSAPaddingOAEP
@@ -862,7 +868,7 @@ func ResolveRoute(device Device, intent Intent) (Route, error) {
 			default:
 				return Route{}, fmt.Errorf("pkcs11: unsupported RSA encryption padding %q", padding)
 			}
-		} else if strings.HasPrefix(string(intent.Algorithm), "aes-") {
+		case strings.HasPrefix(string(intent.Algorithm), "aes-"):
 			switch intent.CipherMode {
 			case "", CipherModeGCM:
 				standard, alias = raw.CKM_AES_GCM, "aes-gcm"
@@ -872,14 +878,14 @@ func ResolveRoute(device Device, intent Intent) (Route, error) {
 				parameter = intent.IV
 			case CipherModeCTR:
 				if len(intent.IV) != 16 {
-					return Route{}, fmt.Errorf("pkcs11: AES-CTR counter must be 16 bytes")
+					return Route{}, errors.New("pkcs11: AES-CTR counter must be 16 bytes")
 				}
 				var counter [16]byte
 				copy(counter[:], intent.IV)
 				standard, alias = raw.CKM_AES_CTR, "aes-ctr"
 				parameter = raw.AESCTRParams{CounterBits: 128, Counter: counter}
 			}
-		} else {
+		default:
 			return Route{}, fmt.Errorf("pkcs11: encryption routing not defined for %s", intent.Algorithm)
 		}
 	default:

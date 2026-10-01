@@ -1,6 +1,9 @@
 package raw
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 func tolerableAttributeRV(value uint) bool {
 	return value == CKR_OK || value == CKR_ATTRIBUTE_SENSITIVE ||
@@ -156,9 +159,9 @@ func (c *Ctx) FindObjectsInit(session SessionHandle, attributes []*Attribute) er
 		c.abi.ulongArgument(uint(session)), template.pointer(), c.abi.ulongArgument(template.count)))
 }
 
-func (c *Ctx) FindObjects(session SessionHandle, max int) ([]ObjectHandle, bool, error) {
-	if max < 1 {
-		return nil, false, fmt.Errorf("pkcs11: max objects must be positive")
+func (c *Ctx) FindObjects(session SessionHandle, maxObjects int) ([]ObjectHandle, bool, error) {
+	if maxObjects < 1 {
+		return nil, false, errors.New("pkcs11: max objects must be positive")
 	}
 	_, unlock, err := c.locked()
 	if err != nil {
@@ -167,7 +170,7 @@ func (c *Ctx) FindObjects(session SessionHandle, max int) ([]ObjectHandle, bool,
 	defer unlock()
 	arena := &nativeArena{}
 	defer arena.close()
-	total, err := checkedProduct(uint(max), uint(c.abi.ULongSize))
+	total, err := checkedProduct(uint(maxObjects), uint(c.abi.ULongSize))
 	if err != nil {
 		return nil, false, err
 	}
@@ -180,18 +183,18 @@ func (c *Ctx) FindObjects(session SessionHandle, max int) ([]ObjectHandle, bool,
 		return nil, false, err
 	}
 	if err := rv(c.call(functionFindObjects,
-		c.abi.ulongArgument(uint(session)), objectsPointer, c.abi.ulongArgument(uint(max)), countPointer)); err != nil {
+		c.abi.ulongArgument(uint(session)), objectsPointer, c.abi.ulongArgument(uint(maxObjects)), countPointer)); err != nil {
 		return nil, false, err
 	}
 	count := c.abi.getULong(countBytes, 0)
-	if count > uint(max) {
-		return nil, false, fmt.Errorf("pkcs11: module returned %d objects for a %d-object buffer", count, max)
+	if count > uint(maxObjects) {
+		return nil, false, fmt.Errorf("pkcs11: module returned %d objects for a %d-object buffer", count, maxObjects)
 	}
 	result := make([]ObjectHandle, count)
 	for index := range result {
 		result[index] = ObjectHandle(c.abi.getULong(objects, index*c.abi.ULongSize))
 	}
-	return result, int(count) == max, nil
+	return result, int(count) == maxObjects, nil
 }
 
 func (c *Ctx) FindObjectsFinal(session SessionHandle) error {

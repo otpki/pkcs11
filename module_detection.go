@@ -206,7 +206,7 @@ func probeModule(ctx context.Context, candidate ModuleCandidate, vendors []Vendo
 		return probe
 	}
 	probe.Interface = module.raw.Interface()
-	devices, discoverErr := discoverManaged(module, CompatibilityConfig{}, vendors)
+	devices, discoverErr := discoverManaged(ctx, module, CompatibilityConfig{}, vendors)
 	releaseErr := releaseModule(module)
 	probe.Devices = devices
 	if discoverErr != nil || releaseErr != nil {
@@ -232,6 +232,7 @@ func DetectModules(ctx context.Context, config DetectionConfig, vendors ...Vendo
 		}
 		probes = append(probes, probeModule(ctx, candidate, vendors))
 	}
+	//nolint:nilerr // Partial probe results are useful when the context was canceled.
 	return probes, nil
 }
 
@@ -257,7 +258,7 @@ func OpenDetected(ctx context.Context, config Config, detection DetectionConfig)
 		return nil, err
 	}
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("pkcs11: no native PKCS #11 module candidates found")
+		return nil, errors.New("pkcs11: no native PKCS #11 module candidates found")
 	}
 	var errs []error
 	for _, candidate := range candidates {
@@ -272,7 +273,7 @@ func OpenDetected(ctx context.Context, config Config, detection DetectionConfig)
 			if familyPreferred(family, detection.PreferredFamilies) {
 				return client, nil
 			}
-			closeErr := client.Close()
+			closeErr := client.Close(ctx)
 			err = fmt.Errorf("detected family %q is not preferred", family)
 			if closeErr != nil {
 				err = errors.Join(err, closeErr)
@@ -281,7 +282,7 @@ func OpenDetected(ctx context.Context, config Config, detection DetectionConfig)
 		errs = append(errs, fmt.Errorf("%s: %w", candidate.Path, err))
 	}
 	if len(errs) == 0 {
-		return nil, fmt.Errorf("pkcs11: no candidate matched preferred families")
+		return nil, errors.New("pkcs11: no candidate matched preferred families")
 	}
 	return nil, fmt.Errorf("pkcs11: no detected module could be opened: %w", errors.Join(errs...))
 }

@@ -1,6 +1,9 @@
 package utimaco
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // HBSRandomSource selects the QuantumProtect hash-based-signature key source.
 type HBSRandomSource byte
@@ -25,10 +28,10 @@ type HSSGenerateParameters struct {
 // MarshalBinary serializes the HSS/LMS generation record.
 func (p HSSGenerateParameters) MarshalBinary() ([]byte, error) {
 	if len(p.LMSTypes) == 0 || len(p.LMSTypes) > 8 {
-		return nil, fmt.Errorf("utimaco: HSS requires between 1 and 8 levels")
+		return nil, errors.New("utimaco: HSS requires between 1 and 8 levels")
 	}
 	if len(p.LMSTypes) != len(p.LMOTSTypes) {
-		return nil, fmt.Errorf("utimaco: HSS LMS and LM-OTS level counts differ")
+		return nil, errors.New("utimaco: HSS LMS and LM-OTS level counts differ")
 	}
 	if p.RandomSource != HBSRandomPseudo && p.RandomSource != HBSRandomReal {
 		return nil, fmt.Errorf("utimaco: invalid HBS random source %d", p.RandomSource)
@@ -62,7 +65,7 @@ func (p XMSSGenerateParameters) MarshalBinary() ([]byte, error) {
 		return nil, fmt.Errorf("utimaco: invalid HBS random source %d", p.RandomSource)
 	}
 	if p.OID == 0 {
-		return nil, fmt.Errorf("utimaco: XMSS OID selector is required")
+		return nil, errors.New("utimaco: XMSS OID selector is required")
 	}
 	multiTree := byte(0)
 	if p.MultiTree {

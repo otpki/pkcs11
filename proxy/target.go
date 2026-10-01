@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -334,6 +335,7 @@ type brokerTarget struct {
 	stop            chan struct{}
 	closeOnce       sync.Once
 	closeErr        error
+	obs             *serverObs
 }
 
 func (target *brokerTarget) currentEpoch() [16]byte {
@@ -367,6 +369,9 @@ func brokerClientConfig(config pkcs11.Config, budget SessionBudget) pkcs11.Confi
 	config.Sessions.MaxOperations = budget.MaxOperationsPerSession
 	config.Login.Mode = pkcs11.LoginNone
 	config.PIN = nil
+	if config.Hooks == (pkcs11.Hooks{}) {
+		config.Hooks = pkcs11.OTelHooks()
+	}
 	return config
 }
 
@@ -378,6 +383,22 @@ func (target *brokerTarget) currentClient() *pkcs11.Client {
 	client := target.client
 	target.clientMu.RUnlock()
 	return client
+}
+
+// routeInfo returns the published descriptor for this route. Token metadata is
+// a snapshot of the physical token the managed client is currently bound to;
+// it refreshes when the client rediscovers the token after hotplug.
+func (target *brokerTarget) routeInfo() RouteInfo {
+	info := RouteInfo{ID: target.id, Revision: target.revision}
+	if client := target.currentClient(); client != nil {
+		fingerprint := client.Device().Fingerprint
+		info.SlotID = fingerprint.SlotID
+		info.TokenLabel = fingerprint.Token.Label
+		info.TokenSerial = fingerprint.Token.SerialNumber
+		info.Model = fingerprint.Token.Model
+		info.ManufacturerID = fingerprint.Token.ManufacturerID
+	}
+	return info
 }
 
 // swapClient atomically replaces the managed local client and returns the
@@ -395,18 +416,18 @@ func (target *brokerTarget) swapClient(replacement *pkcs11.Client) *pkcs11.Clien
 	return previous
 }
 
-func newBrokerTarget(ctx context.Context, config TargetConfig) (*brokerTarget, error) {
+func newBrokerTarget(ctx context.Context, config TargetConfig, obs *serverObs) (*brokerTarget, error) {
 	config.ID = strings.TrimSpace(config.ID)
 	config.Revision = strings.TrimSpace(config.Revision)
 	if config.ID == "" || config.Revision == "" {
-		return nil, fmt.Errorf("target ID and revision are required")
+		return nil, errors.New("target ID and revision are required")
 	}
 	budget := config.Sessions.normalized()
 	if budget.MaxPhysicalTotal <= budget.ReservedControlSessions {
-		return nil, fmt.Errorf("MaxPhysicalTotal must exceed reserved control sessions")
+		return nil, errors.New("MaxPhysicalTotal must exceed reserved control sessions")
 	}
 	if budget.ReservedControlSessions != 1 {
-		return nil, fmt.Errorf("ReservedControlSessions must be exactly 1")
+		return nil, errors.New("ReservedControlSessions must be exactly 1")
 	}
 	if budget.MaxPinned > budget.MaxPhysicalTotal-budget.ReservedControlSessions {
 		budget.MaxPinned = budget.MaxPhysicalTotal - budget.ReservedControlSessions
@@ -416,10 +437,10 @@ func newBrokerTarget(ctx context.Context, config TargetConfig) (*brokerTarget, e
 		return nil, err
 	}
 	if config.Login.Authenticate == nil && !config.Login.TrustTransportIdentity {
-		return nil, fmt.Errorf("logical Authenticate or TrustTransportIdentity is required")
+		return nil, errors.New("logical Authenticate or TrustTransportIdentity is required")
 	}
 	if config.Client.PIN != nil {
-		return nil, fmt.Errorf("TargetConfig.Client.PIN is not used by the broker; configure Login.PhysicalPIN for server-managed mode or leave both nil for client-activated mode")
+		return nil, errors.New("TargetConfig.Client.PIN is not used by the broker; configure Login.PhysicalPIN for server-managed mode or leave both nil for client-activated mode")
 	}
 	clientConfig := brokerClientConfig(config.Client, budget)
 	client, err := pkcs11.Open(ctx, clientConfig)
@@ -428,7 +449,7 @@ func newBrokerTarget(ctx context.Context, config TargetConfig) (*brokerTarget, e
 	}
 	mode, err := config.Login.resolvePhysicalMode(client.Device().Fingerprint.Token)
 	if err != nil {
-		_ = client.Close()
+		_ = client.Close(ctx)
 		return nil, err
 	}
 	config.Login.Mode = mode
@@ -441,7 +462,7 @@ func newBrokerTarget(ctx context.Context, config TargetConfig) (*brokerTarget, e
 		}
 	}
 	if mode == PhysicalLoginClientActivated && client.LoginScope() == pkcs11.LoginScopeSession {
-		_ = client.Close()
+		_ = client.Close(ctx)
 		return nil, clientActivationUnsupportedError("selected vendor requires per-session physical login; the broker cannot authenticate future sessions without retaining the client PIN")
 	}
 	physicalUserType := config.Login.PhysicalUserType
@@ -450,18 +471,18 @@ func newBrokerTarget(ctx context.Context, config TargetConfig) (*brokerTarget, e
 	}
 	for _, userType := range config.Login.AllowedUserTypes {
 		if userType != physicalUserType {
-			_ = client.Close()
+			_ = client.Close(ctx)
 			return nil, fmt.Errorf("logical user type %d does not match the configured physical identity %d", userType, physicalUserType)
 		}
 	}
 	if physicalUserType == raw.CKU_SO {
 		if !config.Maintenance.Enabled {
-			_ = client.Close()
-			return nil, fmt.Errorf("CKU_SO physical identity requires maintenance mode")
+			_ = client.Close(ctx)
+			return nil, errors.New("CKU_SO physical identity requires maintenance mode")
 		}
 		if budget.MaxClients != 1 {
-			_ = client.Close()
-			return nil, fmt.Errorf("CKU_SO maintenance target requires MaxClients=1")
+			_ = client.Close(ctx)
+			return nil, errors.New("CKU_SO maintenance target requires MaxClients=1")
 		}
 	}
 	target := &brokerTarget{
@@ -471,39 +492,37 @@ func newBrokerTarget(ctx context.Context, config TargetConfig) (*brokerTarget, e
 		physicalUserType: physicalUserType, physicalUsername: config.Login.PhysicalUsername,
 		loginScope: client.LoginScope(), remoteSlot: raw.SlotID(1), physicalSlot: client.Device().Fingerprint.SlotID,
 		clients: make(map[[16]byte]*logicalClient), queueSlots: make(chan struct{}, budget.MaxQueued), ledger: newDedupLedger(budget.DedupEntries, budget.DedupMaximumBytes, budget.DedupTTL), stop: make(chan struct{}),
+		obs: obs,
 	}
 	if err := target.rotateEpoch(); err != nil {
-		_ = client.Close()
+		_ = client.Close(ctx)
 		return nil, fmt.Errorf("generate target epoch: %w", err)
 	}
 	control, err := client.AcquireRawSession(ctx, pkcs11.RawSessionOptions{ReadWrite: physicalUserType == raw.CKU_SO, Operation: "proxy-control-session"})
 	if err != nil {
-		_ = client.Close()
+		_ = client.Close(ctx)
 		return nil, fmt.Errorf("open control session: %w", err)
 	}
 	target.control = control
 	if config.Login.EagerPhysicalLogin {
 		if _, err := target.ensurePhysicalLogin(ctx, RequestIdentity{Principal: "proxy-bootstrap", Target: target.id, Revision: target.revision}, [16]byte{}, target.physicalUserType, target.physicalUsername, nil, false, false); err != nil {
-			_ = target.close()
+			_ = target.close(ctx)
 			return nil, err
 		}
 	}
-	go target.sweep()
+	go target.sweep(ctx)
 	return target, nil
 }
 
-func (target *brokerTarget) handle(ctx context.Context, identity RequestIdentity, req request) response {
+func (target *brokerTarget) handle(ctx context.Context, identity RequestIdentity, req request, server *Server) response {
 	// Read-only/idempotent calls may be executed again safely and are deliberately
 	// not retained in the deduplication ledger, avoiding long-lived copies of
 	// attributes, plaintext, or random output. Non-idempotent calls retain their
 	// exact response for bounded same-request replay after a transport failure.
 	if methodIdempotent(req.Method) {
-		return target.execute(ctx, identity, req)
+		return target.execute(ctx, identity, req, server)
 	}
-	fingerprint, err := requestFingerprint(req)
-	if err != nil {
-		return response{Version: protocolVersion, Epoch: target.currentEpoch(), Error: encodeError(err)}
-	}
+	fingerprint := requestFingerprint(req)
 	key := dedupKey{principal: identity.Principal, client: req.ClientID, request: req.RequestID}
 	entry, leader, replay, err := target.ledger.begin(ctx, key, fingerprint)
 	if err != nil {
@@ -512,12 +531,12 @@ func (target *brokerTarget) handle(ctx context.Context, identity RequestIdentity
 	if !leader {
 		return replay
 	}
-	result := target.execute(ctx, identity, req)
+	result := target.execute(ctx, identity, req, server)
 	target.ledger.complete(key, entry, result)
 	return result
 }
 
-func (target *brokerTarget) execute(ctx context.Context, identity RequestIdentity, req request) (result response) {
+func (target *brokerTarget) execute(ctx context.Context, identity RequestIdentity, req request, server *Server) (result response) {
 	result.Version = protocolVersion
 	result.Epoch = target.currentEpoch()
 	defer func() {
@@ -547,7 +566,7 @@ func (target *brokerTarget) execute(ctx context.Context, identity RequestIdentit
 			result.Error = encodeError(raw.ErrClosed)
 			return
 		}
-		description := describeResult{Path: "p11proxy://" + target.id + "@" + target.revision, Interface: client.Interface(), Epoch: target.currentEpoch(), Codecs: target.registry.Descriptors()}
+		description := describeResult{Path: "p11proxy://" + target.id + "@" + target.revision, Interface: client.Interface(), Epoch: target.currentEpoch(), Codecs: target.registry.Descriptors(), ServerID: server.instanceID, AcceptingNewClients: server.accepting()}
 		encoded, err := encodeWireValue(description, target.registry)
 		if err != nil {
 			result.Error = encodeError(err)
@@ -574,7 +593,7 @@ func (target *brokerTarget) execute(ctx context.Context, identity RequestIdentit
 		// before any pinned physical session or session object is closed.
 		client.authMu.Lock()
 		defer client.authMu.Unlock()
-		result.Error = encodeError(target.removeClient(req.ClientID, client))
+		result.Error = encodeError(target.removeClient(ctx, req.ClientID, client))
 		return
 	}
 
@@ -588,7 +607,7 @@ func (target *brokerTarget) execute(ctx context.Context, identity RequestIdentit
 		return
 	}
 
-	client, err := target.clientFor(req.ClientID, identity.Principal)
+	client, err := target.clientFor(ctx, req.ClientID, identity.Principal, server.accepting(), req.Method)
 	if err != nil {
 		result.Error = encodeError(err)
 		return
@@ -685,7 +704,11 @@ func maintenanceExclusive(method string) bool {
 	}
 }
 
-func (target *brokerTarget) clientFor(id [16]byte, principal string) (*logicalClient, error) {
+// clientFor resolves the logical client for one established request.
+// allowCreate is false while the owning server is draining: already-pinned
+// clients continue, but a ClientID that has never been seen must not begin a
+// new logical application on a process that is leaving service.
+func (target *brokerTarget) clientFor(ctx context.Context, id [16]byte, principal string, allowCreate bool, method string) (*logicalClient, error) {
 	target.clientsMu.Lock()
 	defer target.clientsMu.Unlock()
 	client := target.clients[id]
@@ -693,13 +716,56 @@ func (target *brokerTarget) clientFor(id [16]byte, principal string) (*logicalCl
 		return nil, &RemoteError{Code: "client_identity_mismatch", Message: "logical client ID belongs to a different authenticated principal"}
 	}
 	if client == nil {
+		if !allowCreate {
+			return nil, &RemoteError{Code: "server_draining", Message: "proxy process is draining and not accepting new logical clients"}
+		}
 		if len(target.clients) >= target.budget.MaxClients {
 			return nil, raw.Error(raw.CKR_TOKEN_RESOURCE_EXCEEDED)
 		}
-		client = newLogicalClient(target, id, principal, target.budget.MaxObjectsPerClient)
+		client = newLogicalClient(target, id, principal, method, target.budget.MaxObjectsPerClient)
 		target.clients[id] = client
+		target.obs.emitAudit(ctx, AuditEvent{Type: "client_established", Target: target.id, Method: method, ClientID: hexID(id), Principal: principal})
 	}
 	return client, nil
+}
+
+// clientCount reports established logical clients for drain accounting.
+func (target *brokerTarget) clientCount() int {
+	target.clientsMu.Lock()
+	defer target.clientsMu.Unlock()
+	return len(target.clients)
+}
+
+// clientInfos snapshots every established logical client for the dev
+// dashboard. All fields are secret-free operational metadata.
+func (target *brokerTarget) clientInfos() []ClientInfo {
+	target.clientsMu.Lock()
+	clients := make([]*logicalClient, 0, len(target.clients))
+	for _, client := range target.clients {
+		clients = append(clients, client)
+	}
+	target.clientsMu.Unlock()
+	infos := make([]ClientInfo, 0, len(clients))
+	for _, client := range clients {
+		infos = append(infos, client.info())
+	}
+	return infos
+}
+
+// tokenCapabilities snapshots the token's capability surface for the dev
+// dashboard: mechanism count plus the named algorithms the driver can route.
+func (target *brokerTarget) tokenCapabilities() (algorithms []string, mechanisms int) {
+	client := target.currentClient()
+	if client == nil {
+		return nil, 0
+	}
+	capabilities := client.Capabilities()
+	algorithms = make([]string, 0, len(capabilities.Algorithms))
+	for algorithm := range capabilities.Algorithms {
+		algorithms = append(algorithms, string(algorithm))
+	}
+	sort.Strings(algorithms)
+	return algorithms, len(capabilities.Mechanisms)
 }
 
 func (target *brokerTarget) existingClient(id [16]byte, principal string) (*logicalClient, error) {
@@ -712,7 +778,7 @@ func (target *brokerTarget) existingClient(id [16]byte, principal string) (*logi
 	return client, nil
 }
 
-func (target *brokerTarget) removeClient(id [16]byte, expected *logicalClient) error {
+func (target *brokerTarget) removeClient(ctx context.Context, id [16]byte, expected *logicalClient) error {
 	target.clientsMu.Lock()
 	client := target.clients[id]
 	if client == expected {
@@ -722,9 +788,11 @@ func (target *brokerTarget) removeClient(id [16]byte, expected *logicalClient) e
 	if client == nil || client != expected {
 		return nil
 	}
-	return client.close(target)
+	target.obs.emitAudit(ctx, AuditEvent{Type: "client_destroyed", Target: target.id, ClientID: hexID(id), Principal: expected.principal})
+	return client.close(ctx, target)
 }
 
+//nolint:contextcheck // Nil callers intentionally fall back to a detached context.
 func (target *brokerTarget) acquirePhysical(ctx context.Context, readWrite bool, operation string) (*pkcs11.RawSessionLease, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -795,7 +863,7 @@ func (target *brokerTarget) callControl(ctx context.Context, operation string, r
 	}
 	if target.control != nil {
 		target.control.MarkBroken()
-		_ = target.control.Close()
+		_ = target.control.Close(ctx)
 		target.control = nil
 	}
 	if raw.IsError(err, raw.CKR_DEVICE_REMOVED) || raw.IsError(err, raw.CKR_DEVICE_ERROR) || raw.IsError(err, raw.CKR_CRYPTOKI_NOT_INITIALIZED) {
@@ -843,7 +911,7 @@ func (target *brokerTarget) releasePinned() {
 	}
 }
 
-func (target *brokerTarget) close() error {
+func (target *brokerTarget) close(ctx context.Context) error {
 	if target == nil {
 		return nil
 	}
@@ -861,18 +929,18 @@ func (target *brokerTarget) close() error {
 		target.clientsMu.Unlock()
 		var errs []error
 		for _, client := range clients {
-			if err := client.close(target); err != nil {
+			if err := client.close(ctx, target); err != nil {
 				errs = append(errs, err)
 			}
 		}
 		if target.control != nil {
-			if err := target.control.Close(); err != nil {
+			if err := target.control.Close(ctx); err != nil {
 				errs = append(errs, err)
 			}
 		}
 		client := target.swapClient(nil)
 		if client != nil {
-			if err := client.Close(); err != nil {
+			if err := client.Close(ctx); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -881,13 +949,13 @@ func (target *brokerTarget) close() error {
 	return target.closeErr
 }
 
-func (target *brokerTarget) sweep() {
+func (target *brokerTarget) sweep(ctx context.Context) {
 	ticker := time.NewTicker(target.sweepInterval())
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			target.sweepClients()
+			target.sweepClients(ctx)
 		case <-target.stop:
 			return
 		}
@@ -912,7 +980,7 @@ func (target *brokerTarget) sweepInterval() time.Duration {
 	return interval
 }
 
-func (target *brokerTarget) sweepClients() {
+func (target *brokerTarget) sweepClients(ctx context.Context) {
 	now := time.Now()
 	target.clientsMu.Lock()
 	var expired []*logicalClient
@@ -930,10 +998,12 @@ func (target *brokerTarget) sweepClients() {
 	// Native session cleanup can block in vendor middleware. Never hold
 	// clientsMu while closing or expiring sessions.
 	for _, client := range active {
-		client.expireSessions(target, now)
+		client.expireSessions(ctx, target, now)
 	}
 	for _, client := range expired {
-		_ = client.closeRuntimeState(target)
+		target.obs.emitAudit(context.Background(), //nolint:contextcheck // The reaper runs outside any request context.
+			AuditEvent{Type: "client_expired", Target: target.id, ClientID: hexID(client.id), Principal: client.principal})
+		_ = client.closeRuntimeState(ctx, target)
 	}
 }
 

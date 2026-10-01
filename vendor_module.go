@@ -3,6 +3,7 @@ package pkcs11
 import (
 	"context"
 	"crypto"
+	"errors"
 	"fmt"
 	"runtime"
 	"sort"
@@ -444,7 +445,7 @@ type VendorSession interface {
 	Device() Device
 	ReadWrite() bool
 	Call(context.Context, string, func(raw.Module, raw.SessionHandle) error) error
-	Resolve(ObjectRef) (raw.ObjectHandle, error)
+	Resolve(context.Context, ObjectRef) (raw.ObjectHandle, error)
 	MarkBroken()
 	InvalidateObjects()
 }
@@ -462,7 +463,7 @@ func normalizeVendorDefinition(definition VendorDefinition) (VendorDefinition, e
 	definition.Name = strings.TrimSpace(definition.Name)
 	definition.Source = strings.TrimSpace(definition.Source)
 	if definition.ID == "" {
-		return VendorDefinition{}, fmt.Errorf("vendor module ID is required")
+		return VendorDefinition{}, errors.New("vendor module ID is required")
 	}
 	if definition.ID == AdapterGeneric {
 		return VendorDefinition{}, fmt.Errorf("vendor module ID %q is reserved", AdapterGeneric)

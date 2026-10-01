@@ -1,0 +1,94 @@
+version: "2"
+
+linters:
+  default: standard
+
+  enable:
+    # Modern Go / simplification.
+    - modernize
+    - copyloopvar
+    - unconvert
+    - unparam
+    - usestdlibvars
+
+    # Correctness.
+    - contextcheck
+    - durationcheck
+    - errorlint
+    - errname
+    - nilerr
+    - nilnesserr
+    - wastedassign
+    - makezero
+    - gocritic
+    - recvcheck
+    - forcetypeassert
+
+    # Context / lifecycle.
+    - containedctx
+    - fatcontext
+
+    # Observability.
+    - spancheck
+    - sloglint
+
+    # Security.
+    - gosec
+    - bidichk
+    - asciicheck
+
+    # Test correctness.
+    - usetesting
+    - thelper
+    - reassign
+
+    # Repository hygiene.
+    - nolintlint
+    - misspell
+    - dupword
+    - whitespace
+    - revive
+
+  exclusions:
+    generated: lax
+    warn-unused: true
+
+    presets:
+      - comments
+
+    rules:
+      # PKCS#11 uses SHA-1 because the protocol exposes mechanisms such as
+      # CKM_SHA_1 and SHA-1-based OAEP/MGF variants.
+      - linters:
+          - gosec
+        text: "^G505:"
+
+      # PKCS#11 terminology legitimately includes SecretKey / secret-key
+      # identifiers that aren't credentials.
+      - linters:
+          - gosec
+        text: "^G101:"
+
+      # Integer narrowing is the marshaling contract at the PKCS#11 ABI and
+      # vendor wire boundaries. Keep G115 enabled everywhere else.
+      - path: "(raw/|vendors/)"
+        linters:
+          - gosec
+        text: "^G115:"
+
+      # unsafe.Pointer is the mechanism of the native ABI layer itself; every
+      # call site there is audited.
+      - path: "raw/"
+        linters:
+          - gosec
+        text: "^G103:"
+
+      # Test/conformance code isn't part of the production attack surface.
+      - path: "(_test\\.go|examples/|internal/cmd/|conformance/|testmock/)"
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports

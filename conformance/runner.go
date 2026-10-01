@@ -48,7 +48,7 @@ func Test(t *testing.T, profile Profile, options ...RunOption) {
 		t.Fatalf("open module: %v", err)
 	}
 	defer func() {
-		if err := client.Close(); err != nil {
+		if err := client.Close(ctx); err != nil {
 			t.Errorf("close module: %v", err)
 		}
 	}()
@@ -62,6 +62,7 @@ func Test(t *testing.T, profile Profile, options ...RunOption) {
 	}
 }
 
+//nolint:revive // testing.T conventionally precedes ctx in Go test helpers.
 func (r *Runner) testCase(t *testing.T, parent context.Context, testCase Case) {
 	t.Helper()
 	if testCase.Notes != "" {

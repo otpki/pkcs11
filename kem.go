@@ -2,7 +2,7 @@ package pkcs11
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"github.com/otpki/pkcs11/raw"
 )
@@ -117,11 +117,11 @@ func (c *Client) Encapsulate(ctx context.Context, publicKey ObjectRef, options K
 			}
 		}
 
-		handle, resolveErr := session.Resolve(publicKey)
+		handle, resolveErr := session.Resolve(ctx, publicKey)
 		if resolveErr != nil {
 			return resolveErr
 		}
-		ciphertext, secret, callErr := session.EncapsulateKey(
+		ciphertext, secret, callErr := session.EncapsulateKey(ctx,
 			[]*raw.Mechanism{route.Mechanism}, handle, template,
 		)
 		if callErr != nil {
@@ -187,11 +187,11 @@ func (c *Client) Decapsulate(ctx context.Context, privateKey ObjectRef, cipherte
 			}
 		}
 
-		handle, resolveErr := session.Resolve(privateKey)
+		handle, resolveErr := session.Resolve(ctx, privateKey)
 		if resolveErr != nil {
 			return resolveErr
 		}
-		secret, callErr := session.DecapsulateKey(
+		secret, callErr := session.DecapsulateKey(ctx,
 			[]*raw.Mechanism{route.Mechanism}, handle, ciphertext, template,
 		)
 		if callErr != nil {
@@ -222,7 +222,7 @@ func (c *Client) ExportValue(ctx context.Context, object ObjectRef) ([]byte, err
 		return nil, err
 	}
 	if len(attributes) != 1 || attributes[0].Value == nil {
-		return nil, fmt.Errorf("pkcs11: CKA_VALUE is unavailable or sensitive")
+		return nil, errors.New("pkcs11: CKA_VALUE is unavailable or sensitive")
 	}
 	return attributes[0].Value, err
 }

@@ -137,6 +137,7 @@ func main() {
 		}
 	}
 }
+
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "gencalls:", err)
 	os.Exit(1)
@@ -189,14 +190,14 @@ func writeIfChanged(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -297,11 +298,11 @@ func parseParameters(block string) ([]parameter, error) {
 	}
 
 	open := strings.Index(withoutComments, "(")
-	close := strings.LastIndex(withoutComments, ");")
-	if open < 0 || close < open {
+	closing := strings.LastIndex(withoutComments, ");")
+	if open < 0 || closing < open {
 		return nil, errors.New("malformed argument list")
 	}
-	body := strings.TrimSpace(withoutComments[open+1 : close])
+	body := strings.TrimSpace(withoutComments[open+1 : closing])
 	if body == "" || body == "void" {
 		return nil, nil
 	}

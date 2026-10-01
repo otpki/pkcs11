@@ -3,6 +3,7 @@ package pkcs11
 import (
 	"crypto"
 	"crypto/rsa"
+	"errors"
 	"fmt"
 )
 
@@ -56,7 +57,7 @@ func prepareSignatureInput(intent Intent, input []byte) ([]byte, error) {
 // salt permitted by the encoded-message width, matching Go's signing behavior.
 func pssSaltLength(publicKey crypto.PublicKey, hash crypto.Hash, requested int) (int, error) {
 	if hash == 0 {
-		return 0, fmt.Errorf("pkcs11: RSA-PSS requires a hash")
+		return 0, errors.New("pkcs11: RSA-PSS requires a hash")
 	}
 	switch requested {
 	case rsa.PSSSaltLengthEqualsHash:
@@ -64,7 +65,7 @@ func pssSaltLength(publicKey crypto.PublicKey, hash crypto.Hash, requested int) 
 	case rsa.PSSSaltLengthAuto:
 		public, ok := publicKey.(*rsa.PublicKey)
 		if !ok || public == nil || public.N == nil {
-			return 0, fmt.Errorf("pkcs11: RSA-PSS automatic salt length requires an RSA public key")
+			return 0, errors.New("pkcs11: RSA-PSS automatic salt length requires an RSA public key")
 		}
 		// RFC 8017 uses emBits = modBits-1 for RSASSA-PSS, then rounds up to the
 		// encoded-message length in octets.

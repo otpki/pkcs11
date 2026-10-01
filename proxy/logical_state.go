@@ -29,6 +29,13 @@ type logicalClient struct {
 	id        [16]byte
 	principal string
 
+	// createdAt and via record when this logical client was established and by
+	// which establishing method (Initialize, ...); the dev dashboard shows them
+	// so operators can attribute clients to workloads without joining audit
+	// events.
+	createdAt time.Time
+	via       string
+
 	// authMu gives one logical Cryptoki application application-wide login
 	// semantics. Ordinary calls take a read lease; login, logout, and finalize
 	// take the write side so private work on sibling sessions cannot race a
@@ -53,7 +60,7 @@ type logicalClient struct {
 	maxObjects      int
 }
 
-func newLogicalClient(target *brokerTarget, id [16]byte, principal string, maxObjects int) *logicalClient {
+func newLogicalClient(target *brokerTarget, id [16]byte, principal, via string, maxObjects int) *logicalClient {
 	if maxObjects <= 0 {
 		maxObjects = 4096
 	}
@@ -61,6 +68,8 @@ func newLogicalClient(target *brokerTarget, id [16]byte, principal string, maxOb
 		target:          target,
 		id:              id,
 		principal:       principal,
+		createdAt:       time.Now(),
+		via:             via,
 		lastUsed:        time.Now(),
 		grants:          make(map[string]loginGrant),
 		sessions:        make(map[raw.SessionHandle]*virtualSession),
@@ -70,6 +79,43 @@ func newLogicalClient(target *brokerTarget, id [16]byte, principal string, maxOb
 		nextObject:      1,
 		maxObjects:      maxObjects,
 	}
+}
+
+// ClientInfo is a secret-free snapshot of one established logical client for
+// the dev dashboard: identity, establishing method, age, and resource use.
+type ClientInfo struct {
+	ID              string    `json:"id"`
+	Target          string    `json:"target"`
+	Principal       string    `json:"principal"`
+	Via             string    `json:"via"`
+	Since           time.Time `json:"since"`
+	LastUsed        time.Time `json:"last_used"`
+	Authenticated   bool      `json:"authenticated"`
+	ActiveRequests  int       `json:"active_requests"`
+	VirtualSessions int       `json:"virtual_sessions"`
+	Objects         int       `json:"objects"`
+}
+
+func (client *logicalClient) info() ClientInfo {
+	client.stateMu.Lock()
+	info := ClientInfo{
+		ID:             hexID(client.id),
+		Target:         client.target.id,
+		Principal:      client.principal,
+		Via:            client.via,
+		Since:          client.createdAt,
+		LastUsed:       client.lastUsed,
+		ActiveRequests: client.active,
+	}
+	client.stateMu.Unlock()
+	info.Authenticated = client.authenticated()
+	client.sessionsMu.Lock()
+	info.VirtualSessions = len(client.sessions)
+	client.sessionsMu.Unlock()
+	client.objectsMu.Lock()
+	info.Objects = len(client.objects)
+	client.objectsMu.Unlock()
+	return info
 }
 
 func (client *logicalClient) initialize() error {
@@ -90,12 +136,6 @@ func (client *logicalClient) isInitialized() bool {
 	client.stateMu.Lock()
 	defer client.stateMu.Unlock()
 	return client.initialized && !client.closed
-}
-
-func (client *logicalClient) touch() {
-	client.stateMu.Lock()
-	client.lastUsed = time.Now()
-	client.stateMu.Unlock()
 }
 
 func (client *logicalClient) beginRequest() error {
@@ -167,13 +207,6 @@ func (client *logicalClient) loginIdentity() (uint, bool) {
 		}
 	}
 	return 0, false
-}
-
-func (client *logicalClient) hasGrant(userType uint, username string) bool {
-	client.stateMu.Lock()
-	defer client.stateMu.Unlock()
-	grant, ok := client.grants[grantKey(userType, username)]
-	return ok && client.grantIsCurrent(grant)
 }
 
 // authenticationRequiredError preserves the ordinary PKCS #11 result while
@@ -335,7 +368,7 @@ func (client *logicalClient) clearLoginAfterLastSessionLocked() {
 	client.objectsMu.Unlock()
 }
 
-func (client *logicalClient) closeSession(target *brokerTarget, handle raw.SessionHandle) error {
+func (client *logicalClient) closeSession(ctx context.Context, target *brokerTarget, handle raw.SessionHandle) error {
 	client.sessionsMu.Lock()
 	session := client.sessions[handle]
 	if session != nil {
@@ -348,10 +381,10 @@ func (client *logicalClient) closeSession(target *brokerTarget, handle raw.Sessi
 	}
 	client.removeAffineObjects(handle)
 	target.releaseVirtualSession()
-	return session.close(target)
+	return session.close(ctx, target)
 }
 
-func (client *logicalClient) closeAllSessions(target *brokerTarget, slot raw.SlotID) error {
+func (client *logicalClient) closeAllSessions(ctx context.Context, target *brokerTarget, slot raw.SlotID) error {
 	client.sessionsMu.Lock()
 	var sessions []*virtualSession
 	for handle, session := range client.sessions {
@@ -366,12 +399,12 @@ func (client *logicalClient) closeAllSessions(target *brokerTarget, slot raw.Slo
 	for _, session := range sessions {
 		client.removeAffineObjects(session.handle)
 		target.releaseVirtualSession()
-		errs = append(errs, session.close(target))
+		errs = append(errs, session.close(ctx, target))
 	}
 	return errors.Join(errs...)
 }
 
-func (client *logicalClient) finalize(target *brokerTarget) error {
+func (client *logicalClient) finalize(ctx context.Context, target *brokerTarget) error {
 	client.stateMu.Lock()
 	if client.closed {
 		client.stateMu.Unlock()
@@ -385,10 +418,10 @@ func (client *logicalClient) finalize(target *brokerTarget) error {
 	client.grants = make(map[string]loginGrant)
 	client.lastUsed = time.Now()
 	client.stateMu.Unlock()
-	return client.closeRuntimeState(target)
+	return client.closeRuntimeState(ctx, target)
 }
 
-func (client *logicalClient) closeRuntimeState(target *brokerTarget) error {
+func (client *logicalClient) closeRuntimeState(ctx context.Context, target *brokerTarget) error {
 	client.sessionsMu.Lock()
 	sessions := client.sessions
 	client.sessions = make(map[raw.SessionHandle]*virtualSession)
@@ -400,7 +433,7 @@ func (client *logicalClient) closeRuntimeState(target *brokerTarget) error {
 	var errs []error
 	for _, session := range sessions {
 		target.releaseVirtualSession()
-		errs = append(errs, session.close(target))
+		errs = append(errs, session.close(ctx, target))
 	}
 	return errors.Join(errs...)
 }
@@ -420,7 +453,7 @@ func (client *logicalClient) resetAfterTokenInitialization() {
 	client.objectsMu.Unlock()
 }
 
-func (client *logicalClient) close(target *brokerTarget) error {
+func (client *logicalClient) close(ctx context.Context, target *brokerTarget) error {
 	client.stateMu.Lock()
 	if client.closed {
 		client.stateMu.Unlock()
@@ -430,10 +463,10 @@ func (client *logicalClient) close(target *brokerTarget) error {
 	client.initialized = false
 	client.grants = make(map[string]loginGrant)
 	client.stateMu.Unlock()
-	return client.closeRuntimeState(target)
+	return client.closeRuntimeState(ctx, target)
 }
 
-func (client *logicalClient) expireSessions(target *brokerTarget, now time.Time) {
+func (client *logicalClient) expireSessions(ctx context.Context, target *brokerTarget, now time.Time) {
 	client.sessionsMu.Lock()
 	var expired []*virtualSession
 	for handle, session := range client.sessions {
@@ -455,7 +488,7 @@ func (client *logicalClient) expireSessions(target *brokerTarget, now time.Time)
 	for _, session := range expired {
 		client.removeAffineObjects(session.handle)
 		target.releaseVirtualSession()
-		_ = session.close(target)
+		_ = session.close(ctx, target)
 	}
 }
 
@@ -503,6 +536,7 @@ func (client *logicalClient) logicalLogin(ctx context.Context, target *brokerTar
 		userType: userType, username: username, granted: time.Now(), activationGeneration: generation,
 	}
 	client.stateMu.Unlock()
+	target.obs.emitAudit(ctx, AuditEvent{Type: "login_grant", Target: target.id, ClientID: hexID(client.id), Principal: identity.Principal})
 	return nil
 }
 
@@ -531,6 +565,7 @@ func (client *logicalClient) logicalLogout(ctx context.Context, target *brokerTa
 	client.stateMu.Lock()
 	client.grants = make(map[string]loginGrant)
 	client.stateMu.Unlock()
+	target.obs.emitAudit(ctx, AuditEvent{Type: "logout", Target: target.id, ClientID: hexID(client.id), Principal: client.principal})
 
 	privateSessionObjects := client.takePrivateObjects()
 
@@ -590,7 +625,7 @@ func (client *logicalClient) logicalLogout(ctx context.Context, target *brokerTa
 				target.releasePinned()
 			}
 			lease.MarkBroken()
-			closeErr := lease.Close()
+			closeErr := lease.Close(ctx)
 			session.lifetime.Unlock()
 			client.removeAffineObjects(session.handle)
 			errs = append(errs, errors.Join(cleanupErr, closeErr))
@@ -609,7 +644,7 @@ func (client *logicalClient) logicalLogout(ctx context.Context, target *brokerTa
 			}
 		}
 		session.lifetime.Unlock()
-		if err := session.releaseIfIdle(target); err != nil {
+		if err := session.releaseIfIdle(ctx, target); err != nil {
 			errs = append(errs, err)
 		}
 		session.mu.Unlock()
@@ -653,7 +688,18 @@ func (target *brokerTarget) ensurePhysicalLogin(
 		identity.Principal,
 		target.login.ActivationFailureCooldown,
 		authorizeLeader,
-		func() error { return target.performPhysicalLogin(ctx, supplied, suppliedAvailable) },
+		func() error {
+			// The perform closure runs only on the leader's physical PIN
+			// attempt, so the audit event corresponds to exactly one device
+			// login try — followers wait for the shared result instead.
+			performErr := target.performPhysicalLogin(ctx, supplied, suppliedAvailable)
+			eventType := "activation"
+			if performErr != nil {
+				eventType = "activation_failure"
+			}
+			target.obs.emitAudit(ctx, AuditEvent{Type: eventType, Target: target.id, ClientID: hexID(clientID), Principal: identity.Principal})
+			return performErr
+		},
 	)
 	if err != nil && target.login.Mode == PhysicalLoginClientActivated && raw.IsError(err, raw.CKR_USER_NOT_LOGGED_IN) && !errors.Is(err, ErrActivationRequired) {
 		err = errors.Join(ErrActivationRequired, err)
@@ -742,7 +788,7 @@ func (target *brokerTarget) verifyClientActivatedTokenWideLogin(ctx context.Cont
 	if err != nil {
 		return err
 	}
-	defer lease.Close()
+	defer func() { _ = lease.Close(ctx) }()
 	var info raw.SessionInfo
 	err = lease.Call(ctx, "proxy-client-activation-scope-probe", func(module raw.Module, session raw.SessionHandle) error {
 		var callErr error

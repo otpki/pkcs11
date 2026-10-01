@@ -224,10 +224,10 @@ func (c *Client) FindObjectsInit(session raw.SessionHandle, attributes []*raw.At
 }
 
 // FindObjects forwards raw.Module.FindObjects over one bounded proxy request.
-func (c *Client) FindObjects(session raw.SessionHandle, max int) ([]raw.ObjectHandle, bool, error) {
+func (c *Client) FindObjects(session raw.SessionHandle, maxObjects int) ([]raw.ObjectHandle, bool, error) {
 	var result0 []raw.ObjectHandle
 	var result1 bool
-	err := c.invoke("FindObjects", []any{session, max}, &result0, &result1)
+	err := c.invoke("FindObjects", []any{session, maxObjects}, &result0, &result1)
 	return result0, result1, err
 }
 

@@ -160,7 +160,7 @@ func (c *Client) ValidateRuntime(ctx context.Context, options RuntimeValidationO
 	// widths in their textual formatting.
 	mechanismHash := sha256.New()
 	for _, validation := range report.Mechanisms {
-		fmt.Fprintf(mechanismHash, "%016x:%016x:%016x:%016x\n", uint(validation.Mechanism), validation.Info.MinKeySize, validation.Info.MaxKeySize, validation.Info.Flags)
+		_, _ = fmt.Fprintf(mechanismHash, "%016x:%016x:%016x:%016x\n", uint(validation.Mechanism), validation.Info.MinKeySize, validation.Info.MaxKeySize, validation.Info.Flags)
 	}
 	report.MechanismSHA256 = hex.EncodeToString(mechanismHash.Sum(nil))
 	if len(report.Mechanisms) == 0 {
@@ -230,7 +230,7 @@ type HardwareEvidence struct {
 
 // signingBytes returns the deterministic payload used by Sign and Verify. JSON
 // struct-field order is stable, and clearing Signature prevents self-reference.
-func (e HardwareEvidence) signingBytes() ([]byte, error) {
+func (e *HardwareEvidence) signingBytes() ([]byte, error) {
 	e.Signature = nil
 	return json.Marshal(e)
 }
@@ -255,7 +255,7 @@ func (e *HardwareEvidence) Sign(privateKey ed25519.PrivateKey) error {
 }
 
 // Verify authenticates the evidence signature without comparing it to a runtime report.
-func (e HardwareEvidence) Verify(publicKey ed25519.PublicKey) error {
+func (e *HardwareEvidence) Verify(publicKey ed25519.PublicKey) error {
 	if len(publicKey) != ed25519.PublicKeySize || len(e.Signature) != ed25519.SignatureSize {
 		return errors.New("pkcs11: invalid or unsigned hardware evidence")
 	}

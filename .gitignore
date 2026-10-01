@@ -7,3 +7,32 @@ reports/
 
 # Licensed simulator material staged transiently by conformance fixtures.
 licensed/
+
+# Compiled binaries produced by in-tree go builds. Anchored patterns only —
+# bare names would match the example/cmd source directories of the same name.
+/pkcs11-proxy
+/testclient
+/cmd/pkcs11-proxy/pkcs11-proxy
+/examples/*/client/client
+/examples/*/testclient/testclient
+/genproxy
+*.exe
+*.test
+*.out
+
+# Release packaging output.
+/dist/
+
+# aqua-managed dev tools installed by `just tools`.
+/.tool/
+
+# Local runtime artifacts — dev PKI material, signed audit logs, machine-
+# specific config, and env files must never be committed.
+/pki/
+*.key
+*.pem
+*.log
+audit*.log*
+/pkcs11-proxy.yaml
+.env
+.env.*

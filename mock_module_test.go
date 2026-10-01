@@ -72,7 +72,7 @@ func TestManagedClientAgainstMockModule(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() {
-		if err := client.Close(); err != nil {
+		if err := client.Close(ctx); err != nil {
 			t.Errorf("close: %v", err)
 		}
 	}()
@@ -146,7 +146,7 @@ func TestManagedClientAgainstMockModule(t *testing.T) {
 	}
 
 	err = client.withReadOnlySession(ctx, func(session *sessionLease) error {
-		_, signErr := session.Sign([]byte("not initialized"))
+		_, signErr := session.Sign(ctx, []byte("not initialized"))
 		return signErr
 	})
 	if !errors.Is(err, raw.Error(raw.CKR_FUNCTION_NOT_SUPPORTED)) {
@@ -186,7 +186,7 @@ func TestDeactivateCoordinatesOnePhysicalLogout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = client.Close() }()
+	defer func() { _ = client.Close(context.Background()) }()
 
 	if got := mockDiagnostic(t, client, mockDiagnosticLoginCalls); got != 1 {
 		t.Fatalf("initial physical login calls = %d, want 1", got)
@@ -232,7 +232,7 @@ func TestCombinedSessionBudgetCapsReadOnlyAndReadWritePools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = client.Close() }()
+	defer func() { _ = client.Close(context.Background()) }()
 
 	var leases []*RawSessionLease
 	for _, readWrite := range []bool{false, true, false} {
@@ -244,7 +244,7 @@ func TestCombinedSessionBudgetCapsReadOnlyAndReadWritePools(t *testing.T) {
 	}
 	defer func() {
 		for _, lease := range leases {
-			_ = lease.Close()
+			_ = lease.Close(context.Background())
 		}
 	}()
 

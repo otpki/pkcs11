@@ -1,0 +1,184 @@
+name: release
+
+# Tag pushes publish pkcs11-proxy binaries. Every artifact uses the cgo
+# backend (CGO_ENABLED=1): the broker dlopens vendor PKCS#11 middleware and the
+# purego fallback is not shipped for production use.
+#
+# Linux and Windows cross-compile with zig cc on one runner. The linux targets
+# pin a glibc floor (gnu.2.28 — RHEL 8 / Ubuntu 20.04 / Debian 11 era) so the
+# binaries run on essentially any modern glibc system; a fully-static musl
+# build is not possible because the dlopen'd vendor modules are glibc-linked.
+# darwin builds natively: zig's macOS targets skip code signing and need the
+# system libresolv/Security/CoreFoundation libraries, so arm64 lands on
+# macos-15 and amd64 on macos-15-intel.
+#
+# Build jobs stage binaries as artifacts; the publish job downloads all of
+# them into one directory, produces the single checksums.txt covering every
+# platform, and creates the release. The body is .github/RELEASE_NOTES.md
+# prepended above GitHub's generated changelog, which is categorized by
+# .github/release.yml.
+#
+# The docker job publishes the multiarch container image through the shared
+# otpki/docker-build-image reusable workflow. The Dockerfile cross-compiles
+# with zig on the native builder platform, so no QEMU is needed.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: '1.27.x'
+
+jobs:
+  cross:
+    name: pkcs11-proxy ${{ matrix.goos }}/${{ matrix.goarch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64, zig_target: x86_64-linux-gnu.2.28,  ext: "" }
+          - { goos: linux,   goarch: arm64, zig_target: aarch64-linux-gnu.2.28, ext: "" }
+          - { goos: windows, goarch: amd64, zig_target: x86_64-windows-gnu,     ext: ".exe" }
+          - { goos: windows, goarch: arm64, zig_target: aarch64-windows-gnu,    ext: ".exe" }
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build
+        env:
+          CGO_ENABLED: '1'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          CC="zig cc -target ${{ matrix.zig_target }}" \
+          CXX="zig c++ -target ${{ matrix.zig_target }}" \
+          go build -trimpath -buildvcs=false \
+            -ldflags "-s -w -X main.version=${{ github.ref_name }} -linkmode=external" \
+            -o "dist/pkcs11-proxy_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.ext }}" \
+            ./cmd/pkcs11-proxy
+      - name: Verify glibc floor (linux)
+        if: matrix.goos == 'linux'
+        run: |
+          bin="dist/pkcs11-proxy_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.ext }}"
+          readelf -l "$bin" | grep -q 'INTERP'   # dynamic: dlopen needs libc
+          readelf -d "$bin" | grep -q '(NEEDED).*libc'
+          highest=$(readelf -V "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1)
+          echo "highest glibc symbol: ${highest:-none}"
+          [ -z "$highest" ] || [ "${highest#GLIBC_}" = "$(printf '%s\n%s\n' "${highest#GLIBC_}" "2.28" | sort -V | head -1)" ]
+      - name: Verify PE header (windows)
+        if: matrix.goos == 'windows'
+        run: file "dist/pkcs11-proxy_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.ext }}" | grep -q 'PE32+'
+      - name: Smoke test (linux amd64)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          dist/pkcs11-proxy_linux_amd64 --version
+          dist/pkcs11-proxy_linux_amd64 serve --help >/dev/null
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+
+  # macOS builds stay native: Go's darwin link needs libresolv and the
+  # Security/CoreFoundation frameworks, which zig's stub libSystem does not
+  # provide. arm64 lands on macos-15, amd64 on macos-15-intel.
+  darwin:
+    name: pkcs11-proxy darwin/${{ matrix.goarch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goarch: arm64, runner: macos-15 }
+          - { goarch: amd64, runner: macos-15-intel }
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+      - name: Build
+        env:
+          CGO_ENABLED: '1'
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -buildvcs=false \
+            -ldflags "-s -w -X main.version=${{ github.ref_name }}" \
+            -o "dist/pkcs11-proxy_darwin_${{ matrix.goarch }}" \
+            ./cmd/pkcs11-proxy
+      - name: Smoke test
+        run: |
+          file "dist/pkcs11-proxy_darwin_${{ matrix.goarch }}"
+          "dist/pkcs11-proxy_darwin_${{ matrix.goarch }}" --version
+          "dist/pkcs11-proxy_darwin_${{ matrix.goarch }}" serve --help >/dev/null
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin-darwin-${{ matrix.goarch }}
+          path: dist/
+
+  # Multiarch container image via the shared org workflow. Publishes
+  # $REGISTRY_URL/otpki-pkcs11-proxy tagged with the release tag and latest.
+  docker:
+    name: Container image (linux/amd64+arm64)
+    uses: otpki/docker-build-image/.github/workflows/reusable-docker-build-image.yml@v1
+    with:
+      registry_url: ${{ vars.REGISTRY_URL }}
+      image_prefix: otpki
+      app: pkcs11-proxy
+      extra_tag: ${{ github.ref_name }}
+      platforms: linux/amd64,linux/arm64
+      setup_qemu: false
+      provenance: true
+      cache_from: |
+        type=gha,scope=pkcs11-proxy-docker
+      cache_to: |
+        type=gha,mode=max,scope=pkcs11-proxy-docker
+    secrets:
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+  publish:
+    name: Publish release
+    needs: [cross, darwin]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Collect all binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+      - name: Single checksum file across all platforms
+        working-directory: dist
+        run: |
+          ls -la
+          sha256sum pkcs11-proxy_* > checksums.txt
+          cat checksums.txt
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          # RELEASE_NOTES.md is prepended above the generated changelog; the
+          # changelog itself is categorized by .github/release.yml.
+          body_path: .github/RELEASE_NOTES.md
+          generate_release_notes: true

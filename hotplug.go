@@ -2,7 +2,7 @@ package pkcs11
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sort"
 	"time"
 
@@ -62,7 +62,7 @@ type WatchConfig struct {
 // existing state because a hotplug event may have made every old handle stale.
 func (c *Client) Refresh(ctx context.Context) error {
 	if c == nil || c.closed.Load() || c.module == nil {
-		return fmt.Errorf("pkcs11: client is closed")
+		return errors.New("pkcs11: client is closed")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -75,10 +75,10 @@ func (c *Client) Refresh(ctx context.Context) error {
 	c.module.leases.Lock()
 	defer c.module.leases.Unlock()
 	if c.closed.Load() || c.module.closed {
-		return fmt.Errorf("pkcs11: module is closed")
+		return errors.New("pkcs11: module is closed")
 	}
 	current := c.currentDevice()
-	devices, err := discoverManagedWithPlan(c.module, current.plan, c.compatibility, c.vendors)
+	devices, err := discoverManagedWithPlan(ctx, c.module, current.plan, c.compatibility, c.vendors)
 	if err != nil {
 		return err
 	}
@@ -87,7 +87,7 @@ func (c *Client) Refresh(ctx context.Context) error {
 	// invalidate handles that were opened under the previous slot contents.
 	c.module.bumpGeneration()
 	if err != nil {
-		c.invalidateState()
+		c.invalidateState(ctx)
 		return err
 	}
 	// Publish the new diagnostic device before updating pools. The lease write
@@ -96,8 +96,8 @@ func (c *Client) Refresh(ctx context.Context) error {
 	c.device = device
 	c.deviceMu.Unlock()
 	c.module.applyPlanLocked(device.plan)
-	c.roPool.SetDevice(device)
-	c.rwPool.SetDevice(device)
+	c.roPool.SetDevice(ctx, device)
+	c.rwPool.SetDevice(ctx, device)
 	c.cache.invalidate()
 	c.login.reset()
 	return nil

@@ -36,7 +36,7 @@ func main() {
 		Hooks: pkcs11.Hooks{Metrics: observer, Audit: observer, Tracer: observer},
 	})
 	check(err)
-	defer func() { check(client.Close()) }()
+	defer func() { check(client.Close(ctx)) }()
 
 	// Activate warms minimum pool capacity and performs the configured login.
 	check(client.Activate(ctx))
@@ -92,7 +92,7 @@ func main() {
 	// affinity. Always close it promptly so the pool regains capacity.
 	lease, err := client.AcquireRawSession(ctx, pkcs11.RawSessionOptions{ReadWrite: true, Operation: "example-lease"})
 	check(err)
-	defer func() { check(lease.Close()) }()
+	defer func() { check(lease.Close(ctx)) }()
 	check(lease.Call(ctx, "example-random", func(module raw.Module, session raw.SessionHandle) error {
 		value, err := module.GenerateRandom(session, 16)
 		log.Printf("leased-session=%d random=%x", lease.Handle(), value)

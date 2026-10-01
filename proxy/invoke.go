@@ -22,6 +22,8 @@ var (
 // invoke executes one logical Cryptoki method. Module lifecycle, logical
 // sessions, and login are handled here; ordinary session-bound methods are
 // translated and dispatched through one managed physical session lease.
+//
+//nolint:contextcheck // Nil callers intentionally fall back to a detached context.
 func (target *brokerTarget) invoke(
 	ctx context.Context,
 	identity RequestIdentity,
@@ -39,7 +41,7 @@ func (target *brokerTarget) invoke(
 	case "InitializeWithFlags":
 		return nil, nil, client.initialize()
 	case "Finalize":
-		return nil, nil, client.finalize(target)
+		return nil, nil, client.finalize(ctx, target)
 	}
 
 	if !allowsBeforeInitialize(method) && !client.isInitialized() {
@@ -72,7 +74,7 @@ func (target *brokerTarget) invoke(
 		if err != nil {
 			return nil, nil, err
 		}
-		return nil, nil, client.closeSession(target, handle)
+		return nil, nil, client.closeSession(ctx, target, handle)
 	case "CloseAllSessions":
 		if len(arguments) != 1 {
 			return nil, nil, raw.Error(raw.CKR_ARGUMENTS_BAD)
@@ -84,7 +86,7 @@ func (target *brokerTarget) invoke(
 		if err := target.validateSlot(slot); err != nil {
 			return nil, nil, err
 		}
-		return nil, nil, client.closeAllSessions(target, slot)
+		return nil, nil, client.closeAllSessions(ctx, target, slot)
 	case "GetSessionInfo":
 		handle, err := requireSessionArgument(arguments)
 		if err != nil {
@@ -346,7 +348,9 @@ func callRawMethod(module raw.Module, method string, arguments []any) (values []
 		last := outputs[len(outputs)-1]
 		outputs = outputs[:len(outputs)-1]
 		if !last.IsNil() {
-			err = last.Interface().(error)
+			if resultErr, ok := reflect.TypeAssert[error](last); ok {
+				err = resultErr
+			}
 		}
 	}
 	values = make([]any, len(outputs))
@@ -428,7 +432,7 @@ func (target *brokerTarget) invokeLogin(ctx context.Context, identity RequestIde
 		if len(session.operations) == 0 {
 			return raw.Error(raw.CKR_OPERATION_NOT_INITIALIZED)
 		}
-		lease, finish, ok := session.beginPinnedUse(target)
+		lease, finish, ok := session.beginPinnedUse(ctx, target)
 		if !ok {
 			return raw.Error(raw.CKR_OPERATION_NOT_INITIALIZED)
 		}
@@ -498,7 +502,7 @@ func (target *brokerTarget) invokeSessionCancel(ctx context.Context, client *log
 	closeTemporary := temporary
 	defer func() {
 		if closeTemporary {
-			err = errors.Join(err, lease.Close())
+			err = errors.Join(err, lease.Close(ctx))
 		}
 	}()
 	err = lease.Call(ctx, "proxy-session-cancel", func(module raw.Module, native raw.SessionHandle) error {
@@ -519,7 +523,7 @@ func (target *brokerTarget) invokeSessionCancel(ctx context.Context, client *log
 	}
 	// Remove only the operation classes requested by the caller. Session objects
 	// and unrelated halves of a dual-function operation remain pinned.
-	updates, releaseErr := session.cancelOperations(target, names)
+	updates, releaseErr := session.cancelOperations(ctx, target, names)
 	return updates, releaseErr
 }
 
@@ -583,19 +587,19 @@ func (target *brokerTarget) invokeSessionMethod(
 	if err := target.ensureLeaseAuthenticated(ctx, client, lease); err != nil {
 		if temporary {
 			lease.MarkBroken()
-			_ = lease.Close()
+			_ = lease.Close(ctx)
 			closeTemporary = false
 		}
 		return nil, nil, err
 	}
 	defer func() {
 		if closeTemporary {
-			err = errors.Join(err, lease.Close())
+			err = errors.Join(err, lease.Close(ctx))
 		}
 	}()
 
 	borrows := newObjectBorrowSet(target)
-	defer func() { err = errors.Join(err, borrows.close()) }()
+	defer func() { err = errors.Join(err, borrows.close(ctx)) }()
 
 	nativeArguments := make([]any, len(arguments))
 	copy(nativeArguments, arguments)
@@ -664,7 +668,7 @@ func (target *brokerTarget) invokeSessionMethod(
 		client.rollbackVirtualObjects(session, virtualHandles)
 		resultErr := cleanupAfterSuccess(virtualizeErr)
 		if descriptor.Transition != operationStateless || session.pinnedLeaseIs(lease) {
-			session.cancelLeaseLocked(target)
+			session.cancelLeaseLocked(ctx, target)
 			client.removeAffineObjects(session.handle)
 			closeTemporary = false
 		}
@@ -677,7 +681,7 @@ func (target *brokerTarget) invokeSessionMethod(
 		client.rollbackVirtualObjects(session, virtualHandles)
 		resultErr := cleanupAfterSuccess(syncErr)
 		if descriptor.Transition != operationStateless || session.pinnedLeaseIs(lease) {
-			session.cancelLeaseLocked(target)
+			session.cancelLeaseLocked(ctx, target)
 			client.removeAffineObjects(session.handle)
 			closeTemporary = false
 		}
@@ -694,7 +698,7 @@ func (target *brokerTarget) invokeSessionMethod(
 			if raw.IsError(callErr, raw.CKR_PENDING) {
 				lease.MarkBroken()
 				if session.pinnedLeaseIs(lease) {
-					session.cancelLeaseLocked(target)
+					session.cancelLeaseLocked(ctx, target)
 					client.removeAffineObjects(session.handle)
 					closeTemporary = false
 				}
@@ -715,7 +719,7 @@ func (target *brokerTarget) invokeSessionMethod(
 		// rather than returning it to another logical client.
 		if descriptor.Transition != operationStateless || len(descriptor.Required) != 0 {
 			if session.pinnedLeaseIs(lease) {
-				session.cancelLeaseLocked(target)
+				session.cancelLeaseLocked(ctx, target)
 				client.removeAffineObjects(session.handle)
 				closeTemporary = false
 			} else {
@@ -729,7 +733,7 @@ func (target *brokerTarget) invokeSessionMethod(
 		if err := session.startOperation(target, descriptor.Name, lease, firstMechanisms(nativeArguments)); err != nil {
 			client.rollbackVirtualObjects(session, virtualHandles)
 			lease.MarkBroken()
-			_ = lease.Close()
+			_ = lease.Close(ctx)
 			closeTemporary = false
 			return nil, nil, cleanupAfterSuccess(err)
 		}
@@ -741,7 +745,7 @@ func (target *brokerTarget) invokeSessionMethod(
 			if err := session.pin(target, lease); err != nil {
 				client.rollbackVirtualObjects(session, virtualHandles)
 				lease.MarkBroken()
-				_ = lease.Close()
+				_ = lease.Close(ctx)
 				closeTemporary = false
 				return nil, nil, cleanupAfterSuccess(err)
 			}
@@ -752,7 +756,7 @@ func (target *brokerTarget) invokeSessionMethod(
 	}
 
 	if descriptor.Transition == operationFinish {
-		updates, err = session.finishOperation(target, descriptor.Name)
+		updates, err = session.finishOperation(ctx, target, descriptor.Name)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -826,13 +830,16 @@ func firstMechanisms(arguments []any) []*raw.Mechanism {
 
 func (target *brokerTarget) authorizeMaintenance(ctx context.Context, identity RequestIdentity, operation string) error {
 	if !target.maintenance.Enabled {
+		target.obs.emitAudit(ctx, AuditEvent{Type: "maintenance", Target: target.id, Method: operation, ClientID: hexID(identity.ClientID), Principal: identity.Principal, Code: "maintenance_disabled"})
 		return raw.Error(raw.CKR_FUNCTION_NOT_SUPPORTED)
 	}
 	if target.maintenance.Authorize != nil {
 		if err := target.maintenance.Authorize(ctx, identity, operation); err != nil {
+			target.obs.emitAudit(ctx, AuditEvent{Type: "maintenance", Target: target.id, Method: operation, ClientID: hexID(identity.ClientID), Principal: identity.Principal, Code: "maintenance_unauthorized"})
 			return &RemoteError{Code: "maintenance_unauthorized", Message: err.Error()}
 		}
 	}
+	target.obs.emitAudit(ctx, AuditEvent{Type: "maintenance", Target: target.id, Method: operation, ClientID: hexID(identity.ClientID), Principal: identity.Principal})
 	return nil
 }
 
@@ -870,7 +877,7 @@ func (target *brokerTarget) invokeInitToken(ctx context.Context, identity Reques
 	target.controlMu.Lock()
 	defer target.controlMu.Unlock()
 	if target.control != nil {
-		_ = target.control.Close()
+		_ = target.control.Close(ctx)
 		target.control = nil
 	}
 	target.invalidatePhysicalLogin()
@@ -904,7 +911,7 @@ func (target *brokerTarget) invokeInitToken(ctx context.Context, identity Reques
 	// The token label, serial metadata, mechanism inventory, and login state may
 	// all have changed. Close and reopen the managed client by slot rather than
 	// refreshing through the old selector, which may contain the previous label.
-	closeErr := oldClient.Close()
+	closeErr := oldClient.Close(ctx)
 	selectorSlot := target.physicalSlot
 	config := target.clientConfig
 	config.Token = pkcs11.TokenSelector{SlotID: &selectorSlot}
@@ -915,7 +922,7 @@ func (target *brokerTarget) invokeInitToken(ctx context.Context, identity Reques
 	}
 	control, controlErr := newClient.AcquireRawSession(ctx, pkcs11.RawSessionOptions{ReadWrite: true, Operation: "proxy-control-session-after-init-token"})
 	if controlErr != nil {
-		_ = newClient.Close()
+		_ = newClient.Close(ctx)
 		target.closed.Store(true)
 		return errors.Join(closeErr, fmt.Errorf("open control session after token initialization: %w", controlErr))
 	}
@@ -932,12 +939,12 @@ func (target *brokerTarget) invokeInitToken(ctx context.Context, identity Reques
 		target.closed.Store(true)
 		return errors.Join(closeErr, err)
 	}
-	target.resetLogicalClientsAfterTokenInitialization(client.id)
+	target.resetLogicalClientsAfterTokenInitialization(ctx, client.id)
 	target.ledger.reset(target.currentEpoch())
 	return closeErr
 }
 
-func (target *brokerTarget) resetLogicalClientsAfterTokenInitialization(currentID [16]byte) {
+func (target *brokerTarget) resetLogicalClientsAfterTokenInitialization(ctx context.Context, currentID [16]byte) {
 	target.clientsMu.Lock()
 	current := target.clients[currentID]
 	var retired []*logicalClient
@@ -953,7 +960,7 @@ func (target *brokerTarget) resetLogicalClientsAfterTokenInitialization(currentI
 		current.resetAfterTokenInitialization()
 	}
 	for _, candidate := range retired {
-		_ = candidate.close(target)
+		_ = candidate.close(ctx, target)
 	}
 }
 
@@ -973,7 +980,11 @@ func translateObjectValue(value reflect.Value, translate func(raw.ObjectHandle) 
 		return value, nil
 	}
 	if value.Type() == objectHandleType {
-		handle, err := translate(value.Interface().(raw.ObjectHandle))
+		rawHandle, ok := reflect.TypeAssert[raw.ObjectHandle](value)
+		if !ok {
+			return reflect.Value{}, fmt.Errorf("proxy: value typed %v is not an object handle", value.Type())
+		}
+		handle, err := translate(rawHandle)
 		if err != nil {
 			return reflect.Value{}, err
 		}
@@ -1156,7 +1167,10 @@ func (client *logicalClient) virtualizeValue(ctx context.Context, target *broker
 		return value, false, nil, nil
 	}
 	if value.Type() == objectHandleType {
-		native := value.Interface().(raw.ObjectHandle)
+		native, ok := reflect.TypeAssert[raw.ObjectHandle](value)
+		if !ok {
+			return value, false, nil, fmt.Errorf("pkcs11 proxy: value typed %v is not an object handle", value.Type())
+		}
 		if native == 0 {
 			return value, false, nil, nil
 		}
@@ -1282,14 +1296,14 @@ func (client *logicalClient) syncMutableArguments(
 			if !ok || destination == nil || source == nil {
 				continue
 			}
-			copy := *source
-			copy.Value = append([]byte(nil), source.Value...)
+			copied := *source
+			copied.Value = append([]byte(nil), source.Value...)
 			for _, pair := range []struct {
 				native raw.ObjectHandle
 				assign func(raw.ObjectHandle)
 			}{
-				{source.Object, func(value raw.ObjectHandle) { copy.Object = value }},
-				{source.AdditionalObject, func(value raw.ObjectHandle) { copy.AdditionalObject = value }},
+				{source.Object, func(value raw.ObjectHandle) { copied.Object = value }},
+				{source.AdditionalObject, func(value raw.ObjectHandle) { copied.AdditionalObject = value }},
 			} {
 				if pair.native == 0 {
 					continue
@@ -1310,7 +1324,7 @@ func (client *logicalClient) syncMutableArguments(
 				}
 				affine = affine || itemAffine
 			}
-			*destination = copy
+			*destination = copied
 		default:
 			// Message APIs pass typed parameter pointers through an `any` argument.
 			// Copy provider-written fields such as generated GCM IVs back into the
@@ -1329,7 +1343,7 @@ func (client *logicalClient) applyPostCallObjectState(ctx context.Context, targe
 			if handle, ok := original[1].(raw.ObjectHandle); ok {
 				owner := client.removeObject(session, handle)
 				if owner == nil || owner == session {
-					return false, session.releaseIfIdle(target)
+					return false, session.releaseIfIdle(ctx, target)
 				}
 				// A foreign owner's lifetime read lock is held by objectBorrowSet
 				// until this call returns; its close path performs the release.
@@ -1359,7 +1373,7 @@ func (client *logicalClient) applyPostCallObjectState(ctx context.Context, targe
 				return true, nil
 			}
 			if becameStable {
-				return false, session.releaseIfIdle(target)
+				return false, session.releaseIfIdle(ctx, target)
 			}
 		}
 	}

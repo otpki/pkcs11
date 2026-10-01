@@ -76,7 +76,7 @@ func boolValue(value *bool, fallback bool) bool {
 // CKA_SERIAL_NUMBER, including any leading sign-protection octet.
 func certificateSerialDER(cert *x509.Certificate) ([]byte, error) {
 	if cert == nil || cert.SerialNumber == nil {
-		return nil, fmt.Errorf("pkcs11: X.509 certificate serial number is required")
+		return nil, errors.New("pkcs11: X.509 certificate serial number is required")
 	}
 	encoded, err := asn1.Marshal(cert.SerialNumber)
 	if err != nil {
@@ -87,7 +87,7 @@ func certificateSerialDER(cert *x509.Certificate) ([]byte, error) {
 
 func certificateTemplate(cert *x509.Certificate, options CertificateImportOptions) ([]*raw.Attribute, error) {
 	if cert == nil || len(cert.Raw) == 0 {
-		return nil, fmt.Errorf("pkcs11: parsed X.509 certificate with DER value is required")
+		return nil, errors.New("pkcs11: parsed X.509 certificate with DER value is required")
 	}
 	serial, err := certificateSerialDER(cert)
 	if err != nil {
@@ -143,16 +143,16 @@ func validateCertificateInvariants(attributes []*raw.Attribute, certificateDER [
 		case raw.CKA_CLASS:
 			value, ok := raw.ULong(attribute.Value)
 			if !ok || value != raw.CKO_CERTIFICATE {
-				return fmt.Errorf("pkcs11: certificate template overrides CKA_CLASS")
+				return errors.New("pkcs11: certificate template overrides CKA_CLASS")
 			}
 		case raw.CKA_CERTIFICATE_TYPE:
 			value, ok := raw.ULong(attribute.Value)
 			if !ok || value != raw.CKC_X_509 {
-				return fmt.Errorf("pkcs11: certificate template overrides CKA_CERTIFICATE_TYPE")
+				return errors.New("pkcs11: certificate template overrides CKA_CERTIFICATE_TYPE")
 			}
 		case raw.CKA_VALUE:
 			if string(attribute.Value) != string(certificateDER) {
-				return fmt.Errorf("pkcs11: certificate template overrides CKA_VALUE")
+				return errors.New("pkcs11: certificate template overrides CKA_VALUE")
 			}
 		}
 	}
@@ -190,19 +190,19 @@ func (c *Client) ImportCertificate(ctx context.Context, cert *x509.Certificate, 
 			// Search and deletion occur in the same managed read/write session. PKCS #11
 			// has no portable transaction primitive, so replacement remains best effort.
 			if options.ID == nil && options.Label == "" {
-				return fmt.Errorf("pkcs11: ReplaceExisting requires certificate ID or label")
+				return errors.New("pkcs11: ReplaceExisting requires certificate ID or label")
 			}
-			handles, findErr := session.FindAllObjects(certificateQueryTemplate(CertificateQuery{Label: options.Label, ID: options.ID}), 64)
+			handles, findErr := session.FindAllObjects(ctx, certificateQueryTemplate(CertificateQuery{Label: options.Label, ID: options.ID}), 64)
 			if findErr != nil {
 				return findErr
 			}
 			for _, existing := range handles {
-				if destroyErr := session.DestroyObject(existing); destroyErr != nil {
+				if destroyErr := session.DestroyObject(ctx, existing); destroyErr != nil {
 					return fmt.Errorf("pkcs11: replace certificate object 0x%x: %w", uint(existing), destroyErr)
 				}
 			}
 		}
-		handle, err = session.CreateObject(attributes)
+		handle, err = session.CreateObject(ctx, attributes)
 		return err
 	})
 	if err != nil {
@@ -233,7 +233,7 @@ func (c *Client) FindCertificates(ctx context.Context, query CertificateQuery) (
 	var result []CertificateRef
 	var collected []error
 	err := c.withSession(ctx, sessionOptions{Operation: "find-certificates", Idempotent: true}, func(session *sessionLease) error {
-		handles, findErr := session.FindAllObjects(certificateQueryTemplate(query), 64)
+		handles, findErr := session.FindAllObjects(ctx, certificateQueryTemplate(query), 64)
 		if findErr != nil {
 			return findErr
 		}
@@ -245,7 +245,7 @@ func (c *Client) FindCertificates(ctx context.Context, query CertificateQuery) (
 			// added after the original certificate object model and is still rejected
 			// by otherwise conforming modules, including SoftHSM 2. Querying it with
 			// CKA_VALUE can make those modules reject the entire request.
-			attributes, attributeErr := session.GetAttributeValue(handle, []*raw.Attribute{
+			attributes, attributeErr := session.GetAttributeValue(ctx, handle, []*raw.Attribute{
 				raw.NewAttribute(raw.CKA_LABEL, nil),
 				raw.NewAttribute(raw.CKA_ID, nil),
 				raw.NewAttribute(raw.CKA_VALUE, nil),
@@ -270,7 +270,7 @@ func (c *Client) FindCertificates(ctx context.Context, query CertificateQuery) (
 			// CKA_UNIQUE_ID is useful durable metadata, but it is optional for
 			// compatibility. Ignore only CKR_ATTRIBUTE_TYPE_INVALID; transport,
 			// session, and other operational errors still belong in the result.
-			uniqueAttributes, uniqueErr := session.GetAttributeValue(handle, []*raw.Attribute{
+			uniqueAttributes, uniqueErr := session.GetAttributeValue(ctx, handle, []*raw.Attribute{
 				raw.NewAttribute(raw.CKA_UNIQUE_ID, nil),
 			})
 			if len(uniqueAttributes) == 1 && uniqueAttributes[0] != nil {
@@ -298,14 +298,14 @@ func (c *Client) FindCertificates(ctx context.Context, query CertificateQuery) (
 // FindCertificateForKey resolves exactly one certificate by the key's CKA_ID.
 func (c *Client) FindCertificateForKey(ctx context.Context, key ObjectRef) (CertificateRef, error) {
 	if key.ID == nil {
-		return CertificateRef{}, fmt.Errorf("pkcs11: key has no CKA_ID")
+		return CertificateRef{}, errors.New("pkcs11: key has no CKA_ID")
 	}
 	certificates, err := c.FindCertificates(ctx, CertificateQuery{ID: key.ID, Limit: 2})
 	if err != nil && len(certificates) == 0 {
 		return CertificateRef{}, err
 	}
 	if len(certificates) == 0 {
-		return CertificateRef{}, fmt.Errorf("pkcs11: no certificate matches key CKA_ID")
+		return CertificateRef{}, errors.New("pkcs11: no certificate matches key CKA_ID")
 	}
 	if len(certificates) > 1 {
 		return CertificateRef{}, fmt.Errorf("pkcs11: %d certificates match key CKA_ID", len(certificates))

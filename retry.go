@@ -1,7 +1,6 @@
 package pkcs11
 
 import (
-	"errors"
 	"time"
 
 	"github.com/otpki/pkcs11/raw"
@@ -113,12 +112,3 @@ func ClassifyError(err error, retryGeneral bool) RecoveryAction {
 func classifyDeviceError(device Device, err error, retryGeneral bool) RecoveryAction {
 	return classifyVendorError(device, err, retryGeneral)
 }
-
-func retryable(err error, retryGeneral bool) bool {
-	return ClassifyError(err, retryGeneral) != RecoveryNone && !errors.Is(err, contextCanceledSentinel)
-}
-
-// An internal marker used to avoid importing context only for an errors.Is
-// branch in hot retry classification. Context cancellation is checked before
-// this helper is reached.
-var contextCanceledSentinel = errors.New("pkcs11: context canceled")

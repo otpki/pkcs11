@@ -1,8 +1,10 @@
 package raw
 
 import (
+	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"unsafe"
 )
 
@@ -27,7 +29,7 @@ type nativeArena struct {
 
 func (a *nativeArena) alloc(length int) (uintptr, []byte, error) {
 	if a == nil || a.closed {
-		return 0, nil, fmt.Errorf("pkcs11: native arena is closed")
+		return 0, nil, errors.New("pkcs11: native arena is closed")
 	}
 	if length < 0 {
 		return 0, nil, fmt.Errorf("pkcs11: negative native allocation %d", length)
@@ -84,8 +86,8 @@ func (a *nativeArena) close() {
 	// Release in reverse allocation order. This is not required by Cryptoki,
 	// but it mirrors ordinary stack-like ownership and keeps nested relocations
 	// alive until their parent structures are no longer observable.
-	for index := len(a.blocks) - 1; index >= 0; index-- {
-		if release := a.blocks[index].release; release != nil {
+	for _, block := range slices.Backward(a.blocks) {
+		if release := block.release; release != nil {
 			release()
 		}
 	}
@@ -203,6 +205,7 @@ func (b *nativeLayoutBuilder) addFixed(size int) int { return b.add(size, 1) }
 func (b *nativeLayoutBuilder) addULong() int {
 	return b.add(b.abi.ULongSize, b.abi.fieldAlignment(b.abi.ULongSize))
 }
+
 func (b *nativeLayoutBuilder) addPointer() int {
 	return b.add(b.abi.PointerSize, b.abi.fieldAlignment(b.abi.PointerSize))
 }
@@ -263,6 +266,7 @@ func (abi NativeABI) getPointer(buffer []byte, offset int) uintptr {
 	}
 }
 
+//nolint:unused // used by the purego backend in native_context_purego.go
 func (abi NativeABI) pointerAt(address uintptr) uintptr {
 	return abi.getPointer(nativeBytes(address, abi.PointerSize), 0)
 }
@@ -275,6 +279,7 @@ func (abi NativeABI) ulongArgument(value uint) uintptr {
 	return uintptr(value)
 }
 
+//nolint:unused // used by the purego backend in native_context_purego.go
 func (abi NativeABI) ulongResult(value uintptr) uint {
 	if abi.ULongSize == 4 {
 		return uint(uint32(value))

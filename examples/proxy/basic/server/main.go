@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -70,7 +71,7 @@ func main() {
 		},
 	})
 	check(err)
-	defer func() { check(server.Close()) }()
+	defer func() { check(server.Close(ctx)) }()
 
 	log.Printf("listening=%s routes=%v", server.Addr(), server.TargetIDs())
 	go func() {
@@ -95,7 +96,7 @@ func main() {
 func logicalAuthenticator(expected string) proxy.LogicalAuthenticator {
 	return func(_ context.Context, attempt proxy.LoginAttempt) error {
 		if expected == "" || subtle.ConstantTimeCompare(attempt.PIN, []byte(expected)) != 1 {
-			return fmt.Errorf("logical activation denied")
+			return errors.New("logical activation denied")
 		}
 		return nil
 	}

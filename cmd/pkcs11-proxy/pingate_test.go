@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -169,7 +170,7 @@ func TestPINVerifierWaitHonorsContextCancel(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- verifier.Authenticate(ctx, attempt("follower", "pin")) }()
 	cancel()
-	if err := <-done; err != context.Canceled {
+	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled wait = %v, want context.Canceled", err)
 	}
 }

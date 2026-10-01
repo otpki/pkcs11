@@ -1,0 +1,34 @@
+# Changelog configuration for GitHub's auto-generated release notes, used by
+# release.yml's generate_release_notes step. Categories bucket merged PRs by
+# label; a PR matching no category lands in "Other changes".
+
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+      - duplicate
+      - wontfix
+    authors:
+      - dependabot
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking-change
+        - breaking
+    - title: New features
+      labels:
+        - enhancement
+        - feature
+    - title: Bug fixes
+      labels:
+        - bug
+        - fix
+    - title: Dependency updates
+      labels:
+        - dependencies
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Other changes
+      labels:
+        - "*"

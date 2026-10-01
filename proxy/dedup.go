@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"fmt"
+	"errors"
 	"hash"
 	"sync"
 	"time"
@@ -59,7 +59,7 @@ func (ledger *dedupLedger) begin(ctx context.Context, key dedupKey, fingerprint 
 	ledger.pruneLocked(time.Now())
 	if ledger.closed {
 		ledger.mu.Unlock()
-		return nil, false, response{}, fmt.Errorf("pkcs11 proxy: request ledger is closed")
+		return nil, false, response{}, errors.New("pkcs11 proxy: request ledger is closed")
 	}
 	if existing := ledger.entries[key]; existing != nil {
 		if existing.fingerprint != fingerprint {
@@ -255,8 +255,8 @@ func cloneResponse(source response) response {
 		result.Updates[index].Parameter.Data = append([]byte(nil), source.Updates[index].Parameter.Data...)
 	}
 	if source.Error != nil {
-		copy := *source.Error
-		result.Error = &copy
+		copied := *source.Error
+		result.Error = &copied
 	}
 	return result
 }
@@ -285,7 +285,7 @@ func wipeResponse(value *response) {
 // the deduplication ledger. The key already contains principal, client ID, and
 // request ID, so a same-ID retry is conservatively replayed rather than executed
 // again even when the caller changes a value accidentally.
-func requestFingerprint(req request) ([32]byte, error) {
+func requestFingerprint(req request) [32]byte {
 	digest := sha256.New()
 	writeShapeString(digest, req.Method)
 	writeShapeUint64(digest, uint64(len(req.Arguments)))
@@ -294,7 +294,7 @@ func requestFingerprint(req request) ([32]byte, error) {
 	}
 	var result [32]byte
 	copy(result[:], digest.Sum(nil))
-	return result, nil
+	return result
 }
 
 func writeWireShape(digest hash.Hash, value wireValue) {

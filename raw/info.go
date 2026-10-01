@@ -58,7 +58,7 @@ func (c *Ctx) GetInfo() (Info, error) {
 }
 
 func functionListInfo(name string, flags uint, pointer uintptr) FunctionListInfo {
-	info := FunctionListInfo{InterfaceInfo: InterfaceInfo{Name: name, Flags: flags}, Pointer: pointer}
+	info := FunctionListInfo{InterfaceInfo{Name: name, Flags: flags}, pointer}
 	if pointer != 0 {
 		version := nativeBytes(pointer, 2)
 		info.Version = Version{Major: version[0], Minor: version[1]}

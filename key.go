@@ -2,6 +2,7 @@ package pkcs11
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -117,7 +118,7 @@ func (p HSSParameters) attributes() ([]*raw.Attribute, error) {
 		p.Levels = uint(len(p.LMSTypes))
 	}
 	if p.Levels == 0 {
-		return nil, fmt.Errorf("pkcs11: HSS levels are required")
+		return nil, errors.New("pkcs11: HSS levels are required")
 	}
 	if len(p.LMSTypes) != int(p.Levels) || len(p.LMOTSTypes) != int(p.Levels) {
 		return nil, fmt.Errorf("pkcs11: HSS levels (%d) must match LMS (%d) and LM-OTS (%d) type counts", p.Levels, len(p.LMSTypes), len(p.LMOTSTypes))
@@ -332,20 +333,20 @@ func validateInvariants(attributes []*raw.Attribute, class, keyType, parameterSe
 	if value, ok := invariantValue(attributes, raw.CKA_CLASS); ok {
 		actual, valid := raw.ULong(value)
 		if !valid || actual != class {
-			return fmt.Errorf("pkcs11: template overrides CKA_CLASS with incompatible value")
+			return errors.New("pkcs11: template overrides CKA_CLASS with incompatible value")
 		}
 	}
 	if value, ok := invariantValue(attributes, raw.CKA_KEY_TYPE); ok {
 		actual, valid := raw.ULong(value)
 		if !valid || actual != keyType {
-			return fmt.Errorf("pkcs11: template overrides CKA_KEY_TYPE with incompatible value")
+			return errors.New("pkcs11: template overrides CKA_KEY_TYPE with incompatible value")
 		}
 	}
 	if parameterSet != 0 {
 		if value, ok := invariantValue(attributes, raw.CKA_PARAMETER_SET); ok {
 			actual, valid := raw.ULong(value)
 			if !valid || actual != parameterSet {
-				return fmt.Errorf("pkcs11: template overrides CKA_PARAMETER_SET with incompatible value")
+				return errors.New("pkcs11: template overrides CKA_PARAMETER_SET with incompatible value")
 			}
 		}
 	}
@@ -396,7 +397,7 @@ func (c *Client) GenerateSecretKey(ctx context.Context, options SecretKeyOptions
 	var handle raw.ObjectHandle
 	err = c.withSession(ctx, sessionOptions{Operation: "generate-key", ReadWrite: true}, func(session *sessionLease) error {
 		var generateErr error
-		handle, generateErr = session.GenerateKey([]*raw.Mechanism{route.Mechanism}, attributes)
+		handle, generateErr = session.GenerateKey(ctx, []*raw.Mechanism{route.Mechanism}, attributes)
 		if generateErr != nil {
 			session.MarkBroken()
 		}
@@ -484,7 +485,7 @@ func (c *Client) GenerateKeyPair(ctx context.Context, options KeyPairOptions) (K
 			parameters = &defaults
 		}
 		if parameters == nil {
-			return KeyPair{}, fmt.Errorf("pkcs11: HSS generation requires HSS hierarchy parameters")
+			return KeyPair{}, errors.New("pkcs11: HSS generation requires HSS hierarchy parameters")
 		}
 		if options.Algorithm == AlgorithmLMS {
 			levels := parameters.Levels
@@ -492,7 +493,7 @@ func (c *Client) GenerateKeyPair(ctx context.Context, options KeyPairOptions) (K
 				levels = uint(len(parameters.LMSTypes))
 			}
 			if levels != 1 {
-				return KeyPair{}, fmt.Errorf("pkcs11: LMS requires exactly one LMS/LM-OTS level")
+				return KeyPair{}, errors.New("pkcs11: LMS requires exactly one LMS/LM-OTS level")
 			}
 		}
 		hssAttributes, hssErr := parameters.attributes()
@@ -509,7 +510,7 @@ func (c *Client) GenerateKeyPair(ctx context.Context, options KeyPairOptions) (K
 	}
 	if IsStatefulSignatureAlgorithm(options.Algorithm) {
 		if !privatePolicy.Sensitive || privatePolicy.Extractable {
-			return KeyPair{}, fmt.Errorf("pkcs11: stateful signature private keys must be sensitive and non-extractable")
+			return KeyPair{}, errors.New("pkcs11: stateful signature private keys must be sensitive and non-extractable")
 		}
 	}
 	publicAttributes := mergeAttributes(route.PublicTemplate, policyAttributes(publicPolicy, raw.CKO_PUBLIC_KEY), commonIdentity(options.Label, options.ID), usageAttributes(options.Algorithm, raw.CKO_PUBLIC_KEY))
@@ -533,7 +534,7 @@ func (c *Client) GenerateKeyPair(ctx context.Context, options KeyPairOptions) (K
 	var publicHandle, privateHandle raw.ObjectHandle
 	err = c.withSession(ctx, sessionOptions{Operation: "generate-key-pair", ReadWrite: true}, func(session *sessionLease) error {
 		var generateErr error
-		publicHandle, privateHandle, generateErr = session.GenerateKeyPair([]*raw.Mechanism{route.Mechanism}, publicAttributes, privateAttributes)
+		publicHandle, privateHandle, generateErr = session.GenerateKeyPair(ctx, []*raw.Mechanism{route.Mechanism}, publicAttributes, privateAttributes)
 		if generateErr != nil {
 			session.MarkBroken()
 		}
@@ -561,11 +562,11 @@ func (c *Client) HSSKeysRemaining(ctx context.Context, privateKey ObjectRef) (ui
 		return 0, err
 	}
 	if len(attributes) != 1 {
-		return 0, fmt.Errorf("pkcs11: token did not return CKA_HSS_KEYS_REMAINING")
+		return 0, errors.New("pkcs11: token did not return CKA_HSS_KEYS_REMAINING")
 	}
 	remaining, ok := raw.ULong(attributes[0].Value)
 	if !ok {
-		return 0, fmt.Errorf("pkcs11: invalid CKA_HSS_KEYS_REMAINING encoding")
+		return 0, errors.New("pkcs11: invalid CKA_HSS_KEYS_REMAINING encoding")
 	}
 	return remaining, err
 }

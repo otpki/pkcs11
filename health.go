@@ -184,8 +184,8 @@ func (c *Client) Health(ctx context.Context, options HealthOptions) (HealthRepor
 		if err != nil {
 			return err
 		}
-		_, infoErr := session.GetSessionInfo()
-		closeErr := session.Close()
+		_, infoErr := session.GetSessionInfo(ctx)
+		closeErr := session.Close(ctx)
 		return errors.Join(infoErr, closeErr)
 	}); err != nil {
 		errs = append(errs, err)
@@ -197,7 +197,7 @@ func (c *Client) Health(ctx context.Context, options HealthOptions) (HealthRepor
 		}
 		if err := healthCheck(&report, "random", func() error {
 			return c.withSession(ctx, sessionOptions{ReadWrite: false, Idempotent: true, Operation: "health-random"}, func(session *sessionLease) error {
-				value, err := session.GenerateRandom(length)
+				value, err := session.GenerateRandom(ctx, length)
 				if err == nil && len(value) != length {
 					return fmt.Errorf("pkcs11: token returned %d random bytes, expected %d", len(value), length)
 				}

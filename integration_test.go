@@ -39,7 +39,7 @@ func TestIntegration(t *testing.T) {
 		t.Fatalf("open module: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := client.Close(); err != nil {
+		if err := client.Close(ctx); err != nil {
 			t.Errorf("close module: %v", err)
 		}
 	})

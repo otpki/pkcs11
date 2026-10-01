@@ -45,16 +45,15 @@ func (c *Ctx) callOutput(call outputCall) ([]byte, error) {
 		returned := abi.getULong(lengthBytes, 0)
 		if value == CKR_BUFFER_TOO_SMALL {
 			arena.close()
-			if returned <= requested {
-				if requested == 0 {
-					requested = policy.InitialSize
-				} else if requested > policy.MaximumSize/2 {
-					requested = policy.MaximumSize + 1
-				} else {
-					requested *= 2
-				}
-			} else {
+			switch {
+			case returned > requested:
 				requested = returned
+			case requested == 0:
+				requested = policy.InitialSize
+			case requested > policy.MaximumSize/2:
+				requested = policy.MaximumSize + 1
+			default:
+				requested *= 2
 			}
 			continue
 		}

@@ -91,6 +91,8 @@ func (v *PINVerifier) normalized() (poll, timeout time.Duration) {
 
 // Authenticate implements proxy.LogicalAuthenticator. The supplied PIN is
 // hashed immediately and never retained.
+//
+//nolint:contextcheck // Nil callers intentionally fall back to a detached context.
 func (v *PINVerifier) Authenticate(ctx context.Context, attempt proxy.LoginAttempt) error {
 	if ctx == nil {
 		ctx = context.Background()

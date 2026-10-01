@@ -17,14 +17,3 @@ func cloneIDs(source map[string]NumericID) map[string]NumericID {
 	}
 	return result
 }
-
-func mergeIDs(base, overlay map[string]NumericID) map[string]NumericID {
-	result := cloneIDs(base)
-	if result == nil && len(overlay) != 0 {
-		result = make(map[string]NumericID, len(overlay))
-	}
-	for name, value := range overlay {
-		result[normalizeAlias(name)] = value
-	}
-	return result
-}

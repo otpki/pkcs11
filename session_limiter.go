@@ -21,13 +21,14 @@ type sessionLimiter struct {
 	closeOnce sync.Once
 }
 
-func newSessionLimiter(max int) *sessionLimiter {
-	if max < 1 {
-		max = 1
+func newSessionLimiter(limit int) *sessionLimiter {
+	if limit < 1 {
+		limit = 1
 	}
-	return &sessionLimiter{sem: make(chan struct{}, max), done: make(chan struct{})}
+	return &sessionLimiter{sem: make(chan struct{}, limit), done: make(chan struct{})}
 }
 
+//nolint:contextcheck // Nil callers intentionally fall back to a detached context.
 func (l *sessionLimiter) acquire(ctx context.Context) error {
 	if l == nil {
 		return nil
@@ -80,11 +81,4 @@ func (l *sessionLimiter) used() int {
 		return 0
 	}
 	return len(l.sem)
-}
-
-func (l *sessionLimiter) maximum() int {
-	if l == nil {
-		return 0
-	}
-	return cap(l.sem)
 }

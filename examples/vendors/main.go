@@ -48,7 +48,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer client.Close() // handle the error in a production service
+	defer func() { _ = client.Close(ctx) }() // handle the error in a production service
 	log.Printf("selected vendor=%s variant=%s", client.Adapter().Family, client.Adapter().Variant)
 
 	// Other valid composition choices:

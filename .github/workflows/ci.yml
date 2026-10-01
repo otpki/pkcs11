@@ -7,49 +7,63 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref so force-pushes don't queue stale work.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Tool versions come from .aqua.yaml and check commands from the Justfile —
+# .github/actions/setup-ci installs both so CI and `just` locally agree.
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-ci
+      - name: format
+        run: just format-check
+      - name: lint
+        run: just lint
+      - name: go mod tidy
+        run: just tidy
+      - name: go generate
+        run: just gen
+      # Fails on tracked diffs AND untracked files that generation, tidy, or
+      # lint steps introduced — git diff alone misses untracked output.
+      - name: working tree stays clean
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Generation, tidy, or formatting left changes:"
+            git status --porcelain
+            git diff
+            exit 1
+          fi
+      - name: govulncheck
+        run: just vulncheck
+
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: ./.github/actions/setup-ci
         with:
-          go-version: '1.26.x'
-      - name: Verify pinned OASIS 3.2 headers
-        working-directory: raw/internal/cryptoki/oasis/3.2
-        run: sha256sum -c MANIFEST.sha256
-      - name: Validate native and Windows LLP64 ABI layouts
-        run: |
-          cc -std=c11 -Wall -Wextra -Werror -Iraw/internal/cryptoki \
-            -fsyntax-only raw/internal/cryptoki/abi_layout_test.c
-          clang --target=x86_64-pc-windows-msvc -std=c11 \
-            -Wall -Wextra -Werror -fdeclspec -DCRYPTOKI_FORCE_WIN32 \
-            -Iraw/internal/cryptoki -fsyntax-only \
-            raw/internal/cryptoki/abi_layout_test.c
-          clang --target=aarch64-pc-windows-msvc -std=c11 \
-            -Wall -Wextra -Werror -fdeclspec -DCRYPTOKI_FORCE_WIN32 \
-            -Iraw/internal/cryptoki -fsyntax-only \
-            raw/internal/cryptoki/abi_layout_test.c
-      - run: go generate ./...
-      - run: git diff --exit-code
+          tools: 'false'
+      - name: Verify pinned headers and ABI layouts
+        run: just abi-check
       - name: Test default cgo backend
-        run: CGO_ENABLED=1 go test ./...
+        run: just test
       - name: Test automatic PureGo fallback
-        run: CGO_ENABLED=0 go test ./...
+        run: just test-nocgo
       - name: Force PureGo while cgo is enabled
-        run: CGO_ENABLED=1 go test -tags=pkcs11_purego ./...
+        run: just test-purego
       - name: Race test default backend
-        run: CGO_ENABLED=1 go test -race ./...
+        run: just test-race
       - name: Race test forced PureGo backend
-        run: CGO_ENABLED=1 go test -race -tags=pkcs11_purego ./...
-      - name: Vet default cgo backend
-        run: CGO_ENABLED=1 go vet ./...
-      - name: Vet PureGo fallback
-        run: CGO_ENABLED=0 go vet ./...
-      - name: Vet forced PureGo backend
-        run: CGO_ENABLED=1 go vet -tags=pkcs11_purego ./...
+        run: just test-race-purego
+      - name: Vet all backend combinations
+        run: just vet
       - name: Verify backend source separation
-        run: go test -run TestNativeBackendsRemainSeparated .
+        run: just verify-backends
 
   purego-cross-build:
     runs-on: ubuntu-latest
@@ -65,11 +79,7 @@ jobs:
           - { goos: windows, goarch: arm64 }
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: ./.github/actions/setup-ci
         with:
-          go-version: '1.26.x'
-      - run: go build -buildvcs=false ./...
-        env:
-          CGO_ENABLED: '0'
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+          tools: 'false'
+      - run: just cross-build ${{ matrix.goos }} ${{ matrix.goarch }}

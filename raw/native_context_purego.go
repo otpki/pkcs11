@@ -2,7 +2,10 @@
 
 package raw
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 const activeNativeBackend = NativeBackendPureGo
 
@@ -100,13 +103,13 @@ func (n *nativeContext) selectInterface(abi NativeABI, entry uintptr, name strin
 
 	interfacePointer := abi.getPointer(interfacePointerBytes, 0)
 	if interfacePointer == 0 {
-		return InterfaceInfo{}, fmt.Errorf("pkcs11: C_GetInterface returned a nil interface")
+		return InterfaceInfo{}, errors.New("pkcs11: C_GetInterface returned a nil interface")
 	}
 	layout := interfaceStructLayout(abi)
 	bytes := nativeBytes(interfacePointer, layout.size)
 	table := abi.getPointer(bytes, layout.functionList)
 	if table == 0 {
-		return InterfaceInfo{}, fmt.Errorf("pkcs11: C_GetInterface returned a nil function table")
+		return InterfaceInfo{}, errors.New("pkcs11: C_GetInterface returned a nil function table")
 	}
 
 	versionValue := nativeBytes(table, 2)
@@ -136,7 +139,7 @@ func (n *nativeContext) selectLegacy(abi NativeABI, entry uintptr) (InterfaceInf
 
 	table := abi.getPointer(bytes, 0)
 	if table == 0 {
-		return InterfaceInfo{}, fmt.Errorf("pkcs11: C_GetFunctionList returned a nil function table")
+		return InterfaceInfo{}, errors.New("pkcs11: C_GetFunctionList returned a nil function table")
 	}
 	versionBytes := nativeBytes(table, 2)
 	selected := InterfaceInfo{
@@ -151,7 +154,7 @@ func (n *nativeContext) selectLegacy(abi NativeABI, entry uintptr) (InterfaceInf
 
 func (n *nativeContext) installFunctionTable(abi NativeABI, table uintptr, selected InterfaceInfo) error {
 	if table == 0 {
-		return fmt.Errorf("pkcs11: nil function table")
+		return errors.New("pkcs11: nil function table")
 	}
 	firstPointer := functionTableFirstPointerOffset(abi)
 	var calls [functionCount]uintptr
@@ -168,7 +171,7 @@ func (n *nativeContext) installFunctionTable(abi NativeABI, table uintptr, selec
 	return nil
 }
 
-func (n nativeContext) valid() bool {
+func (n *nativeContext) valid() bool {
 	return n.library != 0 && n.table != 0
 }
 
@@ -183,7 +186,7 @@ func (n *nativeContext) close() error {
 	return err
 }
 
-func (n nativeContext) call(id functionID, arguments ...uintptr) uint {
+func (n *nativeContext) call(id functionID, arguments ...uintptr) uint {
 	if id >= functionCount {
 		return CKR_FUNCTION_NOT_SUPPORTED
 	}
