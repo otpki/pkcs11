@@ -8,11 +8,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/go-viper/mapstructure/v2"
 	pkcs11 "github.com/otpki/pkcs11"
 	"github.com/otpki/pkcs11/internal/auditlog"
 	"github.com/otpki/pkcs11/internal/obslog"
@@ -295,16 +298,7 @@ func loadOptions(flags *pflag.FlagSet) (options, error) {
 	v.SetDefault("config", "")
 	v.SetDefault("targets", []targetSpec{})
 
-	configFile := v.GetString("config")
-	if configFile != "" {
-		v.SetConfigFile(configFile)
-	} else {
-		// Look for ./pkcs11-proxy.yaml by exact path: viper's name search would
-		// otherwise also try the pkcs11-proxy binary itself as a config file.
-		v.SetConfigFile("./" + configBaseName + ".yaml")
-	}
-	// The default file is optional; environment and flags still apply.
-	if err := v.ReadInConfig(); err != nil && (configFile != "" || !os.IsNotExist(err)) {
+	if err := mergeConfigFile(v, v.GetString("config")); err != nil {
 		return options{}, err
 	}
 
@@ -313,6 +307,53 @@ func loadOptions(flags *pflag.FlagSet) (options, error) {
 		return options{}, fmt.Errorf("decode %s config: %w", environmentPrefix, err)
 	}
 	return cfg, nil
+}
+
+// mergeConfigFile treats an empty configFile as ./pkcs11-proxy.yaml, the one
+// file that may be absent.
+func mergeConfigFile(v *viper.Viper, configFile string) error {
+	path := configFile
+	if path == "" {
+		// The default is an exact path. Viper's name search would also try the
+		// pkcs11-proxy binary as a config file.
+		path = "./" + configBaseName + ".yaml"
+	}
+	settings, err := readConfigFile(path)
+	if configFile == "" && errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return v.MergeConfigMap(settings)
+}
+
+// readConfigFile checks the file in a viper of its own, where merged flags and
+// environment cannot hide what it holds.
+func readConfigFile(path string) (map[string]any, error) {
+	file := viper.New()
+	file.SetConfigFile(path)
+	if err := file.ReadInConfig(); err != nil {
+		return nil, err
+	}
+	if err := checkConfigFile(file); err != nil {
+		return nil, fmt.Errorf("config file %q: %w", path, err)
+	}
+	return file.AllSettings(), nil
+}
+
+// checkConfigFile refuses a file value options cannot decode, and the first
+// unknown key in sorted order. Sorting keeps the message the same on every run.
+func checkConfigFile(file *viper.Viper) error {
+	var metadata mapstructure.Metadata
+	recordKeys := func(c *mapstructure.DecoderConfig) { c.Metadata = &metadata }
+	if err := file.Unmarshal(&options{}, recordKeys); err != nil {
+		return err
+	}
+	if len(metadata.Unused) == 0 {
+		return nil
+	}
+	return fmt.Errorf("unknown key %q", slices.Min(metadata.Unused))
 }
 
 // serverTLS builds the transport configuration. TLS requires an explicit

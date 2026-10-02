@@ -84,7 +84,8 @@ Every flag below is one option on three surfaces: the flag itself, the same
 dotted key in the YAML config (--config or ./pkcs11-proxy.yaml), and a
 PKCS11_PROXY_* environment variable — --otel.endpoint, otel.endpoint, and
 PKCS11_PROXY_OTEL_ENDPOINT are one setting. Precedence: flag > env > config >
-default. targets[] is the only YAML-only option.`,
+default. targets[] is the only YAML-only option. An unknown key in the config
+file fails startup naming it.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := loadOptions(cmd.Flags())

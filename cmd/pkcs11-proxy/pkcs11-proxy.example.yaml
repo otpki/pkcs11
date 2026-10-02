@@ -6,6 +6,8 @@
 # flag > env > this file > built-in default. The targets list itself is
 # YAML-only — neither flags nor the environment can express it.
 #
+# An unknown key in this file fails startup naming it.
+#
 # The broker NEVER reads the HSM PIN from this file or the environment. Clients
 # supply it with their login; the first successful login activates the token
 # and the broker retains only an in-memory digest to verify later clients.

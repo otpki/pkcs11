@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/otpki/pkcs11/internal/auditlog"
@@ -87,6 +89,100 @@ func TestViperNestedFlags(t *testing.T) {
 	}
 	if cfg.OTel.Endpoint != "collector:4318" || cfg.Sessions.MaxQueued != 12 || cfg.Audit.Path != "/tmp/a.log" {
 		t.Fatalf("nested flags = %+v", cfg)
+	}
+}
+
+// writeConfig writes yaml into a fresh config file and returns its path.
+func writeConfig(t *testing.T, yaml string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "cfg.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// requireLoadError fails the test when loading options with args succeeds.
+// It also fails it when the error lacks one of wants.
+func requireLoadError(t *testing.T, args []string, wants ...string) {
+	t.Helper()
+	_, err := loadOptions(flagCmd(t, args...))
+	if err == nil {
+		t.Fatalf("loadOptions(%q) returned no error", args)
+	}
+	for _, want := range wants {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %s", err, want)
+		}
+	}
+}
+
+// TestConfigFileUnknownKeyFailsLoad pins the full dotted path the error names.
+func TestConfigFileUnknownKeyFailsLoad(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml, key string
+	}{
+		{"top level", "listen_address: \"10.0.0.9:1111\"\n", "listen_address"},
+		{"section", "sessions:\n  max_quued: 3\n", "sessions.max_quued"},
+		{"targets entry", "targets:\n  - name: hsm\n    modul: /opt/hsm.so\n", "targets[0].modul"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfig(t, tc.yaml)
+			requireLoadError(t, []string{"--config", path}, fmt.Sprintf("config file %q: unknown key %q", path, tc.key))
+		})
+	}
+}
+
+// TestDefaultConfigFileUnknownKeyFailsLoad puts the unknown key in
+// ./pkcs11-proxy.yaml. loadOptions reads that file when --config is empty.
+func TestDefaultConfigFileUnknownKeyFailsLoad(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, configBaseName+".yaml"), []byte("listen_address: \"10.0.0.9:1111\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	requireLoadError(t, nil, `config file "./pkcs11-proxy.yaml": unknown key "listen_address"`)
+}
+
+// TestConfigFileNamesFirstUnknownKey pins the sorted order. A file with
+// several unknown keys then fails with one message on every run.
+func TestConfigFileNamesFirstUnknownKey(t *testing.T) {
+	path := writeConfig(t, "zz_unknown: 1\naa_unknown: 2\n")
+	_, err := loadOptions(flagCmd(t, "--config", path))
+	if err == nil || !strings.Contains(err.Error(), `unknown key "aa_unknown"`) || strings.Contains(err.Error(), "zz_unknown") {
+		t.Fatalf("error = %v, want it to name aa_unknown alone", err)
+	}
+}
+
+// TestConfigFileUndecodableValueFailsUnderFlag overrides an undecodable file
+// value with a flag. The file decodes on its own and still fails.
+func TestConfigFileUndecodableValueFailsUnderFlag(t *testing.T) {
+	path := writeConfig(t, "sessions:\n  max_queued: \"many\"\n")
+	requireLoadError(t, []string{"--config", path, "--sessions.max_queued", "12"},
+		fmt.Sprintf("config file %q", path), "sessions.max_queued")
+}
+
+// TestExampleConfigLoads guards the shipped example against unknown keys.
+func TestExampleConfigLoads(t *testing.T) {
+	cfg, err := loadOptions(flagCmd(t, "--config", configBaseName+".example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Targets) != 1 || cfg.Targets[0].Module != "/opt/vendor/lib/libpkcs11.so" {
+		t.Fatalf("targets = %+v", cfg.Targets)
+	}
+}
+
+// TestUnknownEnvironmentVariableIsIgnored keeps PKCS11_PROXY_* resolution
+// unchanged. The key check reads the config file alone.
+func TestUnknownEnvironmentVariableIsIgnored(t *testing.T) {
+	t.Setenv("PKCS11_PROXY_NO_SUCH_KEY", "1")
+	cfg, err := loadOptions(flagCmd(t, "--config", writeConfig(t, "insecure: true\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Insecure {
+		t.Fatalf("config = %+v", cfg)
 	}
 }
 

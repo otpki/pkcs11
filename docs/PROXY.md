@@ -548,7 +548,8 @@ generated CLI reference at [cli/pkcs11-proxy_serve.md](cli/pkcs11-proxy_serve.md
 doubles as the complete configuration reference — every flag, its default, and
 its description. It regenerates via `go generate ./cmd/pkcs11-proxy` (checked
 in CI); `cmd/pkcs11-proxy/pkcs11-proxy.example.yaml` is the annotated YAML
-counterpart. The `targets` list is the only YAML-only option.
+counterpart. The `targets` list is the only YAML-only option. An unknown key
+in the YAML file fails startup naming it.
 
 ## Container image
 
