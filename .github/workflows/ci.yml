@@ -1,0 +1,101 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+# cancel previous runs on the same PR, but wait for master builds to finish
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  native:
+    name: Native PKCS11 client
+    uses: ./.github/workflows/native.yml
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - name: format
+        run: just format-check
+      - name: lint
+        run: just lint
+      - name: go mod tidy
+        run: just tidy
+      - name: go generate
+        run: just gen
+      - name: working tree stays clean
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Generation, tidy, or formatting left changes:"
+            git status --porcelain
+            git diff
+            exit 1
+          fi
+      - name: govulncheck
+        run: just vulncheck
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+        with:
+          tools: 'false'
+      - name: Build public proxy without private credentials
+        run: |
+          go run build.go
+          dist/pkcs11-proxy --version
+          dist/pkcs11-proxy vendors
+      - name: Verify pinned headers and ABI layouts
+        run: just abi-check
+      - name: Test default cgo backend
+        run: just test
+      - name: Test automatic PureGo fallback
+        run: just test-nocgo
+      - name: Force PureGo while cgo is enabled
+        run: just test-purego
+      - name: Race test default backend
+        run: just test-race
+      - name: Race test forced PureGo backend
+        run: just test-race-purego
+      - name: Vet all backend combinations
+        run: just vet
+      - name: Verify backend source separation
+        run: just verify-backends
+
+  purego-cross-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+        with:
+          tools: 'false'
+      - run: just cross-build ${{ matrix.goos }} ${{ matrix.goarch }}

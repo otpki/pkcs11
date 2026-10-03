@@ -1,0 +1,31 @@
+# Edit this file before starting the service. Installation enables boot startup
+# but does not start the proxy. The example below deliberately needs real paths.
+# A reboot will try to start it, so finish configuration before rebooting.
+#
+# More settings: /usr/share/doc/pkcs11-proxy/pkcs11-proxy.example.yaml
+# Clients provide the HSM PIN at login. Do not put an HSM PIN here.
+
+# Change this to your server's address when remote clients need to connect.
+listen: "127.0.0.1:9443"
+insecure: false
+
+# Supply your own TLS certificate, private key, and trusted client CA.
+# These files and the vendor middleware must be readable by pkcs11-proxy.
+tls:
+  cert_file: "/etc/pkcs11-proxy/tls/server.pem"
+  key_file: "/etc/pkcs11-proxy/tls/server.key"
+  client_ca_file: "/etc/pkcs11-proxy/tls/ca.pem"
+
+targets:
+  - name: "hsm"
+    module: "/opt/vendor/lib/libpkcs11.so"
+    token_label: "mytoken"
+
+# Keep the development dashboard off on installed servers.
+dev_ui:
+  enabled: false
+
+# Optional signed audit log. This directory belongs to the service account.
+# audit:
+#   path: "/var/lib/pkcs11-proxy/audit.log"
+#   key_file: "/var/lib/pkcs11-proxy/audit.key"

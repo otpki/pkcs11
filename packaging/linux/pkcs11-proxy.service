@@ -1,0 +1,23 @@
+[Unit]
+Description=OTPKI PKCS #11 Proxy
+Documentation=https://github.com/otpki/pkcs11
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=pkcs11-proxy
+Group=pkcs11-proxy
+WorkingDirectory=/var/lib/pkcs11-proxy
+Environment=HOME=/var/lib/pkcs11-proxy
+ExecStart=/usr/bin/pkcs11-proxy serve --config /etc/pkcs11-proxy/pkcs11-proxy.yaml
+Restart=on-failure
+RestartSec=5s
+# The default drain is five minutes, followed by up to 30 seconds of shutdown.
+# Increase this if you increase those limits in the YAML config.
+TimeoutStopSec=340s
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

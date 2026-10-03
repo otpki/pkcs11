@@ -1,0 +1,221 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    name: Native PKCS11 client
+    uses: ./.github/workflows/native.yml
+
+  # macOS builds stay native. Go's darwin link needs libresolv and the
+  # Security/CoreFoundation frameworks, which zig's stub libSystem does not
+  # provide. arm64 lands on macos-15, amd64 on macos-15-intel.
+  build:
+    environment: private-vendors-release
+    name: pkcs11-proxy ${{ matrix.goos }}/${{ matrix.goarch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, zig_target: x86_64-windows-gnu,     ext: ".exe", runner: ubuntu-latest }
+          - { goos: windows, goarch: arm64, zig_target: aarch64-windows-gnu,    ext: ".exe", runner: ubuntu-latest }
+          - { goos: darwin,  goarch: arm64, zig_target: "",                     ext: "",     runner: macos-15 }
+          - { goos: darwin,  goarch: amd64, zig_target: "",                     ext: "",     runner: macos-15-intel }
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: otpki
+          repositories: |
+            ${{ github.event.repository.name }}
+            pkcs11-private-vendors
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: true
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27'
+          check-latest: true
+          cache: false
+      - uses: mlugg/setup-zig@v2
+        if: matrix.zig_target != ''
+        with:
+          version: 0.16.0
+          use-cache: false
+      - name: Build host helper
+        run: go build -o "$RUNNER_TEMP/build" build.go
+      - name: Build
+        env:
+          GIT_TAG: ${{ github.ref_name }}
+          CGO_ENABLED: '1'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          if [ -n "${{ matrix.zig_target }}" ]; then
+            export CC="zig cc -target ${{ matrix.zig_target }}"
+            export CXX="zig c++ -target ${{ matrix.zig_target }}"
+          fi
+          "$RUNNER_TEMP/build"
+          mv "dist/pkcs11-proxy${{ matrix.ext }}" "dist/pkcs11-proxy_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.ext }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/pkcs11-proxy_*
+  linux:
+    needs: native
+    name: Linux binaries and packages (amd64 + arm64)
+    environment: private-vendors-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: otpki
+          repositories: |
+            ${{ github.event.repository.name }}
+            pkcs11-private-vendors
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: true
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: false
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: v2.18.2
+          install-only: true
+      - name: Download native libraries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: native-lib-linux*
+          path: .native-release
+          merge-multiple: true
+      - name: Build Linux release with GoReleaser
+        run: goreleaser release --clean --skip=publish
+      - name: Stage Linux release assets
+        run: |
+          mkdir -p dist/release
+          for arch in amd64 arm64; do
+            cp dist/glibc_linux_"$arch"*/pkcs11-proxy "dist/release/pkcs11-proxy_linux_$arch"
+          done
+          cp dist/pkcs11-proxy_*.deb dist/pkcs11-proxy_*.rpm dist/pkcs11-proxy_*.apk dist/pkcs11-proxy_*.pkg.tar.zst dist/release/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-release
+          path: dist/release/*
+  docker:
+    name: Container image (linux/amd64+arm64)
+    needs: [build, linux]
+    environment: private-vendors-release
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
+      DOCKER_BUILD_SUMMARY: 'false'
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: otpki
+          repositories: |
+            ${{ github.event.repository.name }}
+            pkcs11-private-vendors
+      # The build context includes the private submodule, however .git is dockerignored.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: true
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: otpki/docker-build-image@v1
+        with:
+          registry_url: ${{ vars.REGISTRY_URL }}
+          registry_username: ${{ secrets.REGISTRY_USERNAME }}
+          registry_password: ${{ secrets.REGISTRY_PASSWORD }}
+          image_prefix: otpki
+          image_name: otpki-pkcs11-proxy
+          app: pkcs11-proxy
+          extra_tag: ${{ github.ref_name }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          provenance: true
+          cache_from: |
+            type=gha,scope=otpki-pkcs11-proxy
+          cache_to: |
+            type=gha,mode=max,scope=otpki-pkcs11-proxy
+  publish:
+    name: Publish release
+    permissions:
+      contents: write
+    needs: [build, linux, docker, native]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-release
+          path: dist
+      - name: Download native libraries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: native-lib-*
+          path: dist
+          merge-multiple: true
+      - name: Download resolved Rust dependency lock
+        uses: actions/download-artifact@v8
+        with:
+          name: native-dependency-lock
+          path: native-lock
+      - name: Stage native documentation and dependency lock
+        run: |
+          cp native-lock/Cargo.lock dist/pkcs11-proxy-client.Cargo.lock
+          cp native/client.example.yaml dist/pkcs11-proxy-client.example.yaml
+          cp native/README.md dist/pkcs11-proxy-client.README.md
+      - name: Single checksum file across all platforms
+        working-directory: dist
+        run: |
+          sha256sum pkcs11-proxy_* pkcs11-proxy-client_* pkcs11-proxy-client.* > checksums.txt
+          cat checksums.txt
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          # RELEASE_NOTES.md is prepended above the generated changelog; the
+          # changelog itself is categorized by .github/release.yml.
+          body_path: .github/RELEASE_NOTES.md
+          generate_release_notes: true

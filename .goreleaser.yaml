@@ -1,0 +1,151 @@
+# Linux release builds. The macOS and Windows jobs keep their native/toolchain setup.
+# Official releases require the pinned private submodule, just like build.go.
+version: 2
+project_name: pkcs11-proxy
+
+builds:
+  - &glibc_build
+    id: glibc
+    dir: pkcs11-private-vendors
+    main: ./cmd/pkcs11-proxy
+    # Keep the name plain: nFPM uses it as the installed executable name.
+    binary: pkcs11-proxy
+    goos: [linux]
+    goarch: [amd64, arm64]
+    goamd64: [v1]
+    goarm64: [v8.0]
+    env:
+      - CGO_ENABLED=1
+      - 'CC=zig cc -target {{ if eq .Arch "amd64" }}x86_64{{ else }}aarch64{{ end }}-linux-gnu.2.28'
+      - 'CXX=zig c++ -target {{ if eq .Arch "amd64" }}x86_64{{ else }}aarch64{{ end }}-linux-gnu.2.28'
+    flags: [-mod=mod, -trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Tag }}-{{ .ShortCommit }}
+
+  - <<: *glibc_build
+    id: musl
+    # Alpine uses musl. Keep this dynamic: a static musl executable cannot dlopen middleware.
+    env:
+      - CGO_ENABLED=1
+      - 'CC=zig cc -target {{ if eq .Arch "amd64" }}x86_64{{ else }}aarch64{{ end }}-linux-musl -dynamic'
+      - 'CXX=zig c++ -target {{ if eq .Arch "amd64" }}x86_64{{ else }}aarch64{{ end }}-linux-musl -dynamic'
+    ldflags:
+      - -s -w -X main.version={{ .Tag }}-{{ .ShortCommit }} -linkmode=external
+
+# Do not add configs or services to standalone binaries.
+archives:
+  - ids: [glibc]
+    formats: [binary]
+    name_template: pkcs11-proxy_linux_{{ .Arch }}
+
+nfpms:
+  - &linux_package
+    id: glibc
+    ids: [glibc]
+    package_name: pkcs11-proxy
+    file_name_template: 'pkcs11-proxy_{{ .Version }}_linux_{{ .Arch }}'
+    vendor: OTPKI
+    homepage: https://github.com/otpki/pkcs11
+    maintainer: Ryan Riccio <ryan.riccio@omnitrust.com>
+    description: Remote PKCS 11 proxy with token routing and vendor support.
+    license: Apache-2.0
+    formats: [deb, rpm, archlinux]
+    bindir: /usr/bin
+    section: utils
+    priority: optional
+    contents:
+      - src: .native-release/pkcs11-proxy-client_linux_{{ .Arch }}.so
+        dst: /usr/lib/pkcs11-proxy/libpkcs11_proxy_client.so
+        file_info:
+          mode: 0644
+      - src: native/client.example.yaml
+        dst: /etc/pkcs11-proxy/client.yaml
+        type: config|noreplace
+        file_info:
+          mode: 0644
+      - src: native/README.md
+        dst: /usr/share/doc/pkcs11-proxy/native-client.md
+      - src: packaging/linux/pkcs11-proxy.yaml
+        dst: /etc/pkcs11-proxy/pkcs11-proxy.yaml
+        type: config|noreplace
+        file_info:
+          mode: 0640
+      - src: packaging/linux/pkcs11-proxy.service
+        dst: /usr/lib/systemd/system/pkcs11-proxy.service
+        file_info:
+          mode: 0644
+      - src: packaging/linux/package-hooks.sh
+        dst: /usr/lib/pkcs11-proxy/package-hooks
+        file_info:
+          mode: 0755
+      - src: LICENSE
+        dst: /usr/share/licenses/pkcs11-proxy/LICENSE
+      - src: cmd/pkcs11-proxy/pkcs11-proxy.example.yaml
+        dst: /usr/share/doc/pkcs11-proxy/pkcs11-proxy.example.yaml
+      - src: packaging/README.md
+        dst: /usr/share/doc/pkcs11-proxy/packaging.md
+    scripts:
+      postinstall: packaging/linux/postinstall.sh
+      preremove: packaging/linux/preremove.sh
+      postremove: packaging/linux/postremove.sh
+    overrides:
+      deb:
+        dependencies: ['libc6 (>= 2.28)', 'libgcc-s1 | libgcc1', passwd]
+      rpm:
+        # File dependencies work with both RHEL/Fedora shadow-utils and SUSE shadow.
+        dependencies: ['glibc >= 2.28', libgcc, /usr/sbin/useradd, /usr/sbin/groupadd]
+      archlinux:
+        dependencies: [glibc, gcc-libs, shadow]
+    archlinux:
+      scripts:
+        postupgrade: packaging/linux/postupgrade.sh
+
+  - <<: *linux_package
+    id: alpine
+    ids: [musl]
+    formats: [apk]
+    dependencies: [musl, libgcc, busybox, openrc]
+    # Alpine uses OpenRC rather than systemd. No systemd dependency is installed.
+    contents:
+      - src: .native-release/pkcs11-proxy-client_linux_musl_{{ .Arch }}.so
+        dst: /usr/lib/pkcs11-proxy/libpkcs11_proxy_client.so
+        file_info:
+          mode: 0644
+      - src: native/client.example.yaml
+        dst: /etc/pkcs11-proxy/client.yaml
+        type: config|noreplace
+        file_info:
+          mode: 0644
+      - src: native/README.md
+        dst: /usr/share/doc/pkcs11-proxy/native-client.md
+      - src: packaging/linux/pkcs11-proxy.yaml
+        dst: /etc/pkcs11-proxy/pkcs11-proxy.yaml
+        type: config|noreplace
+        file_info:
+          mode: 0640
+      - src: packaging/linux/pkcs11-proxy.openrc
+        dst: /etc/init.d/pkcs11-proxy
+        file_info:
+          mode: 0755
+      - src: packaging/linux/package-hooks.sh
+        dst: /usr/lib/pkcs11-proxy/package-hooks
+        file_info:
+          mode: 0755
+      - src: LICENSE
+        dst: /usr/share/licenses/pkcs11-proxy/LICENSE
+      - src: cmd/pkcs11-proxy/pkcs11-proxy.example.yaml
+        dst: /usr/share/doc/pkcs11-proxy/pkcs11-proxy.example.yaml
+      - src: packaging/README.md
+        dst: /usr/share/doc/pkcs11-proxy/packaging.md
+    overrides: {}
+    apk:
+      scripts:
+        postupgrade: packaging/linux/postupgrade.sh
+
+# The existing publish job creates one release and one checksum file for all platforms.
+release:
+  disable: true
+changelog:
+  disable: true
+checksum:
+  disable: true

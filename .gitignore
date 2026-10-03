@@ -1,0 +1,36 @@
+.idea/
+.DS_Store
+
+reports/
+
+# Licensed simulator material staged transiently by conformance fixtures.
+licensed/
+
+/pkcs11-proxy
+/testclient
+/cmd/pkcs11-proxy/pkcs11-proxy
+/examples/*/client/client
+/examples/*/testclient/testclient
+/genproxy
+*.exe
+*.test
+*.out
+
+/dist/
+
+/.tool/
+
+/pki/
+*.key
+*.pem
+*.log
+audit*.log*
+/pkcs11-proxy.yaml
+.env
+.env.*
+
+# Native client builds and CI staging. Keep native/Cargo.lock when generated.
+/native/target/
+/.native-release/
+/native/tests/__pycache__/
+/native-out/

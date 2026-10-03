@@ -1,0 +1,149 @@
+# Full reference. Start with pkcs11-proxy.example.yaml, not this file.
+# All scalar defaults are shown, except the placeholder TLS certificate paths.
+# Omit a setting to use its default. Zero does not usually mean "disabled".
+# docs/CONFIGURATION.md explains the exceptions and the tuning tradeoffs.
+#
+# Scalar precedence: flags > environment > YAML > defaults.
+# For example: --sessions.max_queued or PKCS11_PROXY_SESSIONS_MAX_QUEUED.
+# targets[] and discovery[] are YAML-only. PINs are supplied by clients.
+
+# Address applications connect to. Use a private address for remote access.
+listen: "127.0.0.1:9443"
+# Give existing clients this long to finish after shutdown is requested.
+drain_timeout: "5m"
+# Time left for cleanup after draining. This cannot cancel a stuck native call.
+shutdown_timeout: "30s"
+# Allow unencrypted traffic only when no server certificate is configured.
+insecure: false
+# Replace configured routes with three fake demo routes. Never use for real keys.
+test: false
+
+tls:
+  # The server certificate and private key must be set together.
+  cert_file: "/etc/pkcs11-proxy/server.pem"
+  key_file: "/etc/pkcs11-proxy/server.key"
+  # Require trusted client certificates and use them to identify each workload.
+  # Without this, TLS encrypts traffic but does not authenticate clients.
+  client_ca_file: "/etc/pkcs11-proxy/client-ca.pem"
+
+targets:
+  - name: "hsm"                    # Name applications use to select this token.
+    module: "/opt/vendor/lib/libpkcs11.so"
+    token_label: "mytoken"          # Prefer a unique label or serial number.
+    # token_serial: "0102"          # An alternative stable token selector.
+    # slot_id: 0                    # Use when the provider has a stable slot ID.
+    # Multiple selectors must all match. No selector picks the first token.
+    vendors: []                    # Empty enables all compiled vendor adapters.
+
+# Use discovery instead of targets to publish every token from a module.
+# Listing routes checks for changes, at most once per refresh_interval.
+# It is not a background polling interval. Zero uses 5s. Negative refreshes
+# on every listing, which can be expensive on a network HSM.
+# discovery:
+#   - module: "/opt/vendor/lib/libpkcs11.so"
+#     name_prefix: "site-a-"        # Avoid duplicate names across modules.
+#     vendors: []
+#     refresh_interval: "5s"
+#     overrides:
+#       - name: "signing"           # This name does not get name_prefix added.
+#         token_serial: "0102"      # Exactly one selector is required here.
+#         # token_label: "mytoken"  # Alternative to token_serial.
+#         # slot_id: 0              # Alternative to token_serial.
+#         sessions:                 # Unlisted settings inherit global values.
+#           max_physical_total: 4
+#         activation:
+#           failure_cooldown: "2s"
+
+# These limits apply separately to every route on every broker replica.
+# Pinned and read/write sessions count toward the physical total, not on top.
+sessions:
+  # Real HSM sessions. One is reserved for login, leaving at most seven for work.
+  # Raise only after checking the provider's limits and measuring queue waits.
+  max_physical_total: 8
+  # Of those sessions, at most four may be read/write. Raise for key creation
+  # or object updates, not simply to speed up ordinary signing.
+  max_physical_read_write: 4
+  # Sessions kept between requests by multipart operations or session objects.
+  # Raise for those workloads, but leave room for ordinary one-shot operations.
+  max_pinned: 2
+  # Requests allowed to wait for a free HSM session. A full queue rejects work.
+  # Raise to absorb short bursts. It does not increase HSM throughput.
+  max_queued: 64
+  # Live logical clients per route. Reuse clients instead of opening one per call.
+  max_clients: 256
+  # Session handles one client may hold. Mostly bookkeeping until work starts.
+  max_virtual_sessions_per_client: 16
+  # Object handles one client may retain, not the number of keys on the HSM.
+  max_objects_per_client: 1024
+  # Maximum wait to borrow capacity. Does not stop an HSM call already running.
+  queue_timeout: "5s"
+  # During shutdown, remove clients idle for this long instead of waiting for
+  # the entire drain timeout. This does not affect normal idle client expiry.
+  client_drain_idle_timeout: "5s"
+
+find_cache:
+  # Reuse completed object searches within a physical session for this long.
+  # Lower when other tools change keys. Raise only when keys rarely change.
+  # Broker-side mutations clear the cache. External changes can stay stale.
+  # Zero uses 15s. Set a negative duration, such as -1s, to disable it.
+  ttl: "15s"
+
+activation:
+  # Pause after a failed physical HSM login. Raising it slows repeated attempts
+  # that could lock the token. This DOES NOT rate-limit software PIN checks.
+  # Zero uses 1s. A negative value disables the physical-login cooldown.
+  failure_cooldown: "1s"
+  # Normally keep zero. Enable only when the PIN can change outside the broker.
+  # After this age, a different PIN may trigger logout and a fresh HSM login.
+  # A wrong replacement PIN can leave the shared token inactive.
+  pin_rotation_interval: "0s"
+
+dev_ui:
+  # Read-only troubleshooting dashboard. It has no authentication.
+  enabled: false
+  listen: "127.0.0.1:9463"
+  # This only permits binding a remote address. It does not secure the UI.
+  allow_remote: false
+
+health:
+  # Empty disables /healthz, /readyz, and /metrics. Use a separate listener,
+  # for example 127.0.0.1:9464. Do not reuse the broker or dashboard port.
+  listen: ""
+  # Requires network access controls because these endpoints have no auth.
+  allow_remote: false
+
+logging:
+  # Use debug while investigating. Keep info for normal operation.
+  level: "info"
+  # Use json for a log collector and text when reading logs yourself.
+  format: "text"
+  # Buffered records before drops begin. A bigger queue absorbs bursts but
+  # uses more memory. It cannot fix a permanently slow log destination.
+  queue_size: 8192
+
+audit:
+  # Empty disables the signed security-event log. Use a private writable
+  # directory and one writer per file. Signing does not encrypt the contents.
+  path: ""
+  # Empty uses <path>.key. Back up this key and its .pub file separately.
+  key_file: ""
+  # Buffered events before drops. Audit failure does not stop HSM operations.
+  queue_size: 4096
+  # Events covered by each signature. Larger batches reduce signing work,
+  # but each record is still written and synced separately.
+  batch_size: 64
+  # Seal a partly filled batch after this interval. Shorter seals sooner.
+  # Zero uses 30s. Negative disables timer-based sealing, not audit logging.
+  checkpoint_interval: "30s"
+
+otel:
+  # OTLP/HTTP collector host:port. Empty disables push export.
+  # Prefer a bare address. URL paths are not supported by the current setup.
+  endpoint: ""
+  # Set true only for a trusted plaintext collector connection. An http://
+  # prefix also enables plaintext. https:// does not override a true value.
+  insecure: false
+  # Name shown in your telemetry backend. Use the same name for replicas.
+  service_name: "pkcs11-proxy"
+  # How often to push metrics. Shorter gives fresher data and more traffic.
+  metric_interval: "15s"

@@ -1,0 +1,3 @@
+[submodule "pkcs11-private-vendors"]
+	path = pkcs11-private-vendors
+	url = https://github.com/otpki/pkcs11-private-vendors.git

@@ -1,0 +1,119 @@
+name: native-client
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependencies:
+    name: Resolve one dependency lock for every target
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Use the committed lock, or resolve it once
+        shell: bash
+        run: |
+          if [ ! -f native/Cargo.lock ]; then
+            cargo generate-lockfile --manifest-path native/Cargo.toml
+          fi
+          cargo metadata --manifest-path native/Cargo.toml --locked --format-version 1 >/dev/null
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-dependency-lock
+          path: native/Cargo.lock
+          if-no-files-found: error
+
+  build:
+    name: Native client ${{ matrix.platform }}/${{ matrix.arch }}
+    needs: dependencies
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux, arch: amd64, target: x86_64-unknown-linux-gnu, runner: ubuntu-24.04, ext: so, source: libpkcs11_proxy_client.so }
+          - { platform: linux, arch: arm64, target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, ext: so, source: libpkcs11_proxy_client.so }
+          - { platform: linux_musl, arch: amd64, target: x86_64-unknown-linux-musl, runner: ubuntu-24.04, ext: so, source: libpkcs11_proxy_client.so }
+          - { platform: linux_musl, arch: arm64, target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, ext: so, source: libpkcs11_proxy_client.so }
+          - { platform: darwin, arch: amd64, target: x86_64-apple-darwin, runner: macos-15-intel, ext: dylib, source: libpkcs11_proxy_client.dylib }
+          - { platform: darwin, arch: arm64, target: aarch64-apple-darwin, runner: macos-15, ext: dylib, source: libpkcs11_proxy_client.dylib }
+          - { platform: windows, arch: amd64, target: x86_64-pc-windows-msvc, runner: windows-2025, ext: dll, source: pkcs11_proxy_client.dll }
+          - { platform: windows, arch: arm64, target: aarch64-pc-windows-msvc, runner: windows-11-arm, ext: dll, source: pkcs11_proxy_client.dll }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-dependency-lock
+          path: native
+      - uses: mlugg/setup-zig@v2
+        if: matrix.platform == 'linux'
+        with:
+          version: 0.16.0
+          use-cache: false
+      - name: Install cross-link helper
+        if: matrix.platform == 'linux'
+        run: cargo install cargo-zigbuild --version 0.23.4 --locked
+      - name: Unit tests on the runner ABI
+        if: matrix.platform != 'linux_musl'
+        run: cargo test --manifest-path native/Cargo.toml --locked
+      - name: Build the shared library
+        env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          case "$PLATFORM" in
+            linux)
+              cargo zigbuild --manifest-path native/Cargo.toml --locked --release --target "$TARGET.2.28"
+              ;;
+            linux_musl)
+              # Build natively against Alpine's runtime, including its unwind library.
+              # A cdylib joins the host's musl runtime rather than embedding another one.
+              docker run --rm -v "$PWD:/src" -w /src -e TARGET \
+                -e RUSTFLAGS='-C target-feature=-crt-static' rust:1-alpine3.23 sh -eu -c '
+                  apk add --no-cache build-base
+                  cargo test --manifest-path native/Cargo.toml --locked --target "$TARGET"
+                  cargo build --manifest-path native/Cargo.toml --locked --release --target "$TARGET"
+                '
+              ;;
+            windows)
+              # Do not make users install the Visual C++ redistributable for one DLL.
+              RUSTFLAGS='-C target-feature=+crt-static' cargo build --manifest-path native/Cargo.toml --locked --release --target "$TARGET"
+              ;;
+            *) cargo build --manifest-path native/Cargo.toml --locked --release --target "$TARGET" ;;
+          esac
+          mkdir -p native-out
+          cp "native/target/$TARGET/release/${{ matrix.source }}" \
+            "native-out/pkcs11-proxy-client_${{ matrix.platform }}_${{ matrix.arch }}.${{ matrix.ext }}"
+          wc -c native-out/*
+      - name: Check the library against the bundled PKCS11 C headers
+        if: matrix.platform == 'linux' || matrix.platform == 'darwin'
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror native/tests/abi.c -ldl -o "$RUNNER_TEMP/native-abi"
+          "$RUNNER_TEMP/native-abi" native-out/*
+      - name: Check the musl library ABI inside Alpine
+        if: matrix.platform == 'linux_musl'
+        run: |
+          docker run --rm -v "$PWD:/src:ro" -w /src alpine:3.23 sh -eu -c \
+            'apk add --no-cache libgcc build-base; cc -std=c11 -Wall -Wextra -Werror native/tests/abi.c -ldl -o /tmp/native-abi; /tmp/native-abi native-out/*.so'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-lib-${{ matrix.platform }}-${{ matrix.arch }}
+          path: native-out/*
+          if-no-files-found: error

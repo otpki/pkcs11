@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+
+description="OTPKI PKCS #11 Proxy"
+command="/usr/bin/pkcs11-proxy"
+command_args="serve --config /etc/pkcs11-proxy/pkcs11-proxy.yaml"
+command_user="pkcs11-proxy:pkcs11-proxy"
+directory="/var/lib/pkcs11-proxy"
+export HOME="/var/lib/pkcs11-proxy"
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=5
+respawn_period=60
+# Match the five-minute drain and 30-second shutdown in the default config.
+retry="TERM/340/KILL/5"
+output_log="/var/log/pkcs11-proxy.log"
+error_log="/var/log/pkcs11-proxy.log"
+umask=0077
+
+depend() {
+    need net
+}
+
+start_pre() {
+    checkpath --file --mode 0640 --owner "$command_user" "$output_log"
+}

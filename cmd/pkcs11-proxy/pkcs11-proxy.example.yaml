@@ -1,0 +1,18 @@
+# Keep loopback for a local app. Use a private interface for remote apps.
+listen: "127.0.0.1:9443"
+
+tls:
+  cert_file: "/etc/pkcs11-proxy/server.pem"
+  key_file: "/etc/pkcs11-proxy/server.key"
+  # Only clients with a certificate trusted by this CA may connect.
+  client_ca_file: "/etc/pkcs11-proxy/client-ca.pem"
+
+targets:
+  # A route gives one token a name that applications can select.
+  - name: "hsm"
+    # Install the vendor's library on the broker host, not the app host.
+    module: "/opt/vendor/lib/libpkcs11.so"
+    # Pick the token explicitly so another token cannot be chosen by accident.
+    token_label: "mytoken"
+
+# There is no HSM PIN here. The application sends it when it logs in.
