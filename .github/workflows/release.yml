@@ -1,0 +1,195 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # macOS builds stay native. Go's darwin link needs libresolv and the
+  # Security/CoreFoundation frameworks, which zig's stub libSystem does not
+  # provide. arm64 lands on macos-15, amd64 on macos-15-intel.
+  build:
+    environment: private-vendors-release
+    name: pkcs11-proxy ${{ matrix.goos }}/${{ matrix.goarch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64, zig_target: x86_64-linux-gnu.2.28,  ext: "",     runner: ubuntu-latest }
+          - { goos: linux,   goarch: arm64, zig_target: aarch64-linux-gnu.2.28, ext: "",     runner: ubuntu-latest }
+          - { goos: windows, goarch: amd64, zig_target: x86_64-windows-gnu,     ext: ".exe", runner: ubuntu-latest }
+          - { goos: windows, goarch: arm64, zig_target: aarch64-windows-gnu,    ext: ".exe", runner: ubuntu-latest }
+          - { goos: darwin,  goarch: arm64, zig_target: "",                     ext: "",     runner: macos-15 }
+          - { goos: darwin,  goarch: amd64, zig_target: "",                     ext: "",     runner: macos-15-intel }
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: otpki
+          repositories: |
+            ${{ github.event.repository.name }}
+            pkcs11-private-vendors
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: true
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27'
+          check-latest: true
+          cache: false
+      - uses: mlugg/setup-zig@v2
+        if: matrix.zig_target != ''
+        with:
+          version: 0.16.0
+          use-cache: false
+      - name: Build host helper
+        run: |
+          test -f pkcs11-private-vendors/go.mod
+          go build -o "$RUNNER_TEMP/build" build.go
+      - name: Build
+        env:
+          GIT_TAG: ${{ github.ref_name }}
+          CGO_ENABLED: '1'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          if [ -n "${{ matrix.zig_target }}" ]; then
+            export CC="zig cc -target ${{ matrix.zig_target }}"
+            export CXX="zig c++ -target ${{ matrix.zig_target }}"
+          fi
+          # Private compiler diagnostics stay on the runner, not in public logs.
+          "$RUNNER_TEMP/build" > "$RUNNER_TEMP/private-build.log" 2>&1 || {
+            echo "Build failed; reproduce the tagged checkout on a trusted local machine."
+            exit 1
+          }
+          mv "dist/pkcs11-proxy${{ matrix.ext }}" "dist/pkcs11-proxy_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.ext }}"
+      - name: Verify and smoke test
+        run: |
+          bin="dist/pkcs11-proxy_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.ext }}"
+          case '${{ matrix.goos }}' in
+            linux)
+              readelf -l "$bin" | grep -q 'INTERP'   # dynamic: dlopen needs libc
+              readelf -d "$bin" | grep -q '(NEEDED).*libc'
+              highest=$(readelf -V "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1)
+              echo "highest glibc symbol: ${highest:-none}"
+              [ -z "$highest" ] || [ "${highest#GLIBC_}" = "$(printf '%s\n%s\n' "${highest#GLIBC_}" "2.28" | sort -V | head -1)" ]
+              ;;
+            windows)
+              file "$bin" | grep -q 'PE32+'
+              ;;
+            darwin)
+              file "$bin"
+              ;;
+          esac
+          # Smoke test where the runner can execute the artifact natively.
+          if [ '${{ matrix.goos }}_${{ matrix.goarch }}' = linux_amd64 ] || [ '${{ matrix.goos }}' = darwin ]; then
+            "$bin" --version
+            "$bin" serve --help >/dev/null
+            vendors=$("$bin" vendors)
+            printf '%s\n' "$vendors" | grep -q '^utimaco'
+            printf '%s\n' "$vendors" | grep -q '^securosys-primus'
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/pkcs11-proxy_*
+          if-no-files-found: error
+      - name: Remove private build files
+        if: always()
+        run: |
+          rm -rf pkcs11-private-vendors .git/modules/pkcs11-private-vendors
+          rm -f "$RUNNER_TEMP/private-build.log"
+
+  docker:
+    name: Container image (linux/amd64+arm64)
+    needs: build
+    environment: private-vendors-release
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
+      DOCKER_BUILD_SUMMARY: 'false'
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: otpki
+          repositories: |
+            ${{ github.event.repository.name }}
+            pkcs11-private-vendors
+      # The build context includes the private submodule, however .git is dockerignored.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: true
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Require private sources and registry
+        env:
+          REGISTRY_URL: ${{ vars.REGISTRY_URL }}
+        run: |
+          test -f pkcs11-private-vendors/go.mod
+          test -n "$REGISTRY_URL"
+      - uses: otpki/docker-build-image@v1
+        with:
+          registry_url: ${{ vars.REGISTRY_URL }}
+          registry_username: ${{ secrets.REGISTRY_USERNAME }}
+          registry_password: ${{ secrets.REGISTRY_PASSWORD }}
+          image_prefix: otpki
+          image_name: otpki-pkcs11-proxy
+          app: pkcs11-proxy
+          extra_tag: ${{ github.ref_name }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          provenance: true
+          cache_from: |
+            type=gha,scope=otpki-pkcs11-proxy
+          cache_to: |
+            type=gha,mode=max,scope=otpki-pkcs11-proxy
+      - name: Remove private build files
+        if: always()
+        run: rm -rf pkcs11-private-vendors .git/modules/pkcs11-private-vendors
+
+  publish:
+    name: Publish release
+    permissions:
+      contents: write
+    needs: [build, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+      - name: Single checksum file across all platforms
+        working-directory: dist
+        run: |
+          test "$(find . -maxdepth 1 -name 'pkcs11-proxy_*' | wc -l)" -eq 6
+          sha256sum pkcs11-proxy_* > checksums.txt
+          cat checksums.txt
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          # RELEASE_NOTES.md is prepended above the generated changelog; the
+          # changelog itself is categorized by .github/release.yml.
+          body_path: .github/RELEASE_NOTES.md
+          generate_release_notes: true

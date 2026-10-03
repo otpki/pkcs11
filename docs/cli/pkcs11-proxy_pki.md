@@ -1,0 +1,22 @@
+## pkcs11-proxy pki
+
+Create a development mTLS tree (CA, server certs, client certs)
+
+### Synopsis
+
+Generate a local Ed25519 CA and certificates for development mTLS.
+Private keys are written to disk with 0600 permissions. Do not use this as a
+replacement for a production CA.
+
+### Options
+
+```
+  -h, --help   help for pki
+```
+
+### SEE ALSO
+
+* [pkcs11-proxy](pkcs11-proxy.md)	 - PKCS #11 proxy broker
+* [pkcs11-proxy pki init](pkcs11-proxy_pki_init.md)	 - Create a new CA and issue the initial server/client certificates
+* [pkcs11-proxy pki issue](pkcs11-proxy_pki_issue.md)	 - Issue an additional server or client certificate under an existing tree
+

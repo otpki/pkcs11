@@ -1,0 +1,105 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    # Weekly rescan picks up new CodeQL queries.
+    - cron: "24 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Scan our GitHub Actions workflows themselves.
+          - language: actions
+            build-mode: none
+
+          # The repo contains real C code used by the PKCS#11 bridge/loaders.
+          # Modern CodeQL can analyze C/C++ directly without requiring a build.
+          - language: c-cpp
+            build-mode: none
+
+          # Go needs explicit builds because the repo supports multiple
+          # mutually exclusive CGO/PureGo/platform implementations.
+          - language: go
+            build-mode: manual
+
+          # Covers the embedded development UI.
+          - language: javascript-typescript
+            build-mode: none
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Private vendor code should be scanned in its own repository.
+          submodules: false
+          persist-credentials: false
+
+      - name: Setup Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+
+      - name: Build Go
+        if: matrix.language == 'go'
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # build.go is excluded from normal package builds with
+          # //go:build ignore, but it drives release builds.
+          go build -o "${RUNNER_TEMP}/pkcs11-build" build.go
+
+          # Normal Linux/amd64 build using the native CGO PKCS#11 backend.
+          CGO_ENABLED=1 \
+            go build -buildvcs=false ./...
+
+          # Automatic PureGo path selected when CGO is disabled.
+          CGO_ENABLED=0 \
+            go build -buildvcs=false ./...
+
+          # Explicit PureGo build tag while CGO remains available.
+          CGO_ENABLED=1 \
+            go build -buildvcs=false -tags=pkcs11_purego ./...
+
+          # Pull Windows-only PureGo implementation files into the database.
+          CGO_ENABLED=0 \
+          GOOS=windows \
+          GOARCH=amd64 \
+            go build -buildvcs=false ./...
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}

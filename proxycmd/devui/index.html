@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<title>pkcs11-proxy · dev</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel-edge: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
+    --ok: #3fb950; --warn: #d29922; --bad: #f85149; --idle: #6e7681;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "SF Pro", "Segoe UI", system-ui, sans-serif;
+    padding: 24px; max-width: 1100px; margin: 0 auto;
+  }
+  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 20px; flex-wrap: wrap; }
+  h1 { font-size: 18px; font-weight: 600; letter-spacing: .02em; }
+  h1 .tag { color: var(--accent); font-weight: 400; }
+  .metas { display: flex; flex-direction: column; gap: 2px; }
+  .meta { color: var(--dim); font-size: 12px; }
+  .meta b { color: var(--text); font-weight: 500; }
+  #poll { margin-left: auto; font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 6px; }
+  #poll .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+  #poll.stale .dot { background: var(--bad); }
+  #poll.paused .dot { background: var(--idle); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; align-items: start; }
+  .card { background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 10px; padding: 12px 16px; }
+  .card h2 { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+  .card .chev { flex: none; width: 10px; color: var(--dim); font-size: 10px; transition: transform .15s ease; }
+  .card.open .chev { transform: rotate(90deg); }
+  .card .tid, .card .rev, .card .sum { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .rev { flex: 0 1 auto; max-width: 14ch; }
+  .card .sum { flex: 1 4 auto; color: var(--dim); font-weight: 400; font-size: 12px; }
+  .card.open .sum { display: none; }
+  .card .tid { user-select: text; }
+  .card.open .tid { white-space: normal; overflow-wrap: anywhere; }
+  .card .detail { display: none; margin-top: 12px; }
+  .card.open .detail { display: block; }
+  .rev { color: var(--dim); font-weight: 400; font-size: 12px; }
+  .badge {
+    margin-left: auto; font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .06em; padding: 3px 10px; border-radius: 999px;
+  }
+  .badge.active    { color: var(--ok);   background: rgba(63,185,80,.12);  border: 1px solid rgba(63,185,80,.4); }
+  .badge.activating{ color: var(--warn); background: rgba(210,153,34,.12); border: 1px solid rgba(210,153,34,.4); }
+  .badge.inactive  { color: var(--idle); background: rgba(110,118,129,.12);border: 1px solid rgba(110,118,129,.4); }
+  .hbadge {
+    margin-left: auto; font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .06em; padding: 3px 10px; border-radius: 999px;
+  }
+  .hbadge + .badge { margin-left: 0; }
+  .hbadge.healthy   { color: var(--ok);   background: rgba(63,185,80,.12);  border: 1px solid rgba(63,185,80,.4); }
+  .hbadge.degraded  { color: var(--warn); background: rgba(210,153,34,.12); border: 1px solid rgba(210,153,34,.4); }
+  .hbadge.unhealthy { color: var(--bad);  background: rgba(248,81,73,.12);  border: 1px solid rgba(248,81,73,.4); }
+  .hbadge.unknown   { color: var(--idle); background: rgba(110,118,129,.12);border: 1px solid rgba(110,118,129,.4); }
+  .tok, .act { font-size: 12px; color: var(--dim); margin: -6px 0 6px; }
+  .act { margin-bottom: 6px; }
+  .health { font-size: 12px; color: var(--bad); margin-bottom: 8px; }
+  .health:empty { margin-bottom: 4px; }
+  .health b { color: var(--text); font-weight: 500; }
+  .tok b, .act b { color: var(--text); font-weight: 500; }
+  .meters { display: grid; gap: 9px; }
+  .meter { display: grid; grid-template-columns: 128px 1fr 74px; align-items: center; gap: 10px; font-size: 12px; }
+  .meter .name { color: var(--dim); }
+  .meter .bar { height: 7px; border-radius: 4px; background: #21262d; overflow: hidden; }
+  .meter .fill { height: 100%; border-radius: 4px; background: var(--accent); transition: width .35s ease; }
+  .meter.hot .fill { background: var(--warn); }
+  .meter.max .fill { background: var(--bad); }
+  .meter .val { font-family: ui-monospace, "SF Mono", Menlo, monospace; text-align: right; }
+  .subgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 12px; }
+  .stat { background: #1c2129; border-radius: 8px; padding: 9px 12px; }
+  .stat .k { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+  .stat .v { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 15px; }
+  canvas.spark { width: 100%; height: 36px; margin-top: 12px; }
+  .spark-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin-top: 10px; }
+  .empty { color: var(--dim); padding: 40px 0; text-align: center; }
+  #audit { display: none; margin-top: 14px; }
+  #audit .card { padding: 16px; }
+  #audit h2 { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  #audit-verify-btn {
+    margin-left: auto; background: #21262d; color: var(--text); border: 1px solid var(--panel-edge);
+    border-radius: 6px; padding: 3px 12px; font-size: 12px; cursor: pointer;
+  }
+  #audit-verify-btn:hover { border-color: var(--accent); }
+  #audit-verify-result { font-size: 12px; color: var(--dim); }
+  #audit-verify-result.ok { color: var(--ok); }
+  #audit-verify-result.bad { color: var(--bad); }
+  .tbl { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  .tbl td, .tbl th { text-align: left; padding: 3px 10px 3px 0; color: var(--dim); }
+  .tbl td:first-child, .tbl th:first-child {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; color: var(--text);
+  }
+  .tbl th { font-weight: 500; text-transform: uppercase; font-size: 10px; letter-spacing: .05em; border-bottom: 1px solid var(--panel-edge); }
+  .tbl td:last-child { color: var(--text); }
+  .tbl .okc { color: var(--ok); } .tbl .badc { color: var(--bad); } .tbl .warnc { color: var(--warn); }
+  .tbl-scroll { max-height: 320px; overflow-y: auto; margin-top: 4px; }
+  .tbl-scroll thead th { position: sticky; top: 0; background: var(--panel); }
+  section.panel { margin-top: 14px; }
+  section.panel .card { padding: 16px; }
+  section.panel h2 { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  #rate-spark { width: 190px; height: 30px; margin-top: 6px; }
+  #pki { margin-top: 14px; }
+  #pki .card { padding: 16px; }
+  #pki h2 { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  #pki h2 .note { color: var(--dim); font-weight: 400; font-size: 11px; margin-left: auto; }
+  .pki-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+  .pki-form label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+  .pki-form input {
+    background: #0d1117; border: 1px solid var(--panel-edge); border-radius: 6px;
+    color: var(--text); padding: 6px 8px; font-size: 13px;
+  }
+  .pki-actions { margin-top: 10px; display: flex; align-items: center; gap: 10px; }
+  .pki-actions button {
+    background: #21262d; color: var(--text); border: 1px solid var(--panel-edge);
+    border-radius: 6px; padding: 5px 14px; font-size: 12px; cursor: pointer;
+  }
+  .pki-actions button:hover { border-color: var(--accent); }
+  #pki-result { font-size: 12px; }
+  #pki-result.ok { color: var(--ok); }
+  #pki-result.bad { color: var(--bad); }
+  #pki-files { margin-top: 10px; display: none; }
+  #pki-files .file {
+    display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 3px 0;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  #pki-files a { color: var(--accent); }
+  footer { margin-top: 22px; font-size: 11px; color: var(--dim); }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .92em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>pkcs11-proxy <span class="tag">dev console</span></h1>
+  <div class="metas">
+    <div class="meta" id="server-meta">connecting…</div>
+    <div class="meta" id="obs-meta"></div>
+    <div class="spark-label"><span style="color:var(--accent)">requests/s</span> · <span style="color:var(--bad)">errors/s</span></div>
+    <canvas id="rate-spark" width="380" height="60"></canvas>
+  </div>
+  <div id="poll"><span class="dot"></span><span id="poll-label">live</span></div>
+</header>
+<main class="grid" id="targets"></main>
+<section id="clients" class="panel"><div class="card">
+  <h2>logical clients</h2>
+  <div class="tbl-scroll">
+  <table class="tbl" id="client-table"><thead>
+    <tr><th>client</th><th>route</th><th>principal</th><th>established</th><th>last active</th><th>auth</th><th>sessions</th><th>objects</th><th>in-flight</th></tr>
+  </thead><tbody></tbody></table>
+  </div>
+</div></section>
+<section id="audit" class="panel"><div class="card">
+  <h2>audit log
+    <span id="audit-verify-result"></span>
+    <button id="audit-verify-btn">verify chain</button>
+  </h2>
+  <div class="meta" id="audit-meta"></div>
+  <div class="tbl-scroll">
+  <table class="tbl" id="audit-events"><thead>
+    <tr><th>seq</th><th>time</th><th>event</th><th>detail</th></tr>
+  </thead><tbody></tbody></table>
+  </div>
+</div></section>
+<section id="pki"><div class="card">
+  <h2>dev mTLS tree <span class="note">generated in memory — nothing is written to disk; download what you need</span></h2>
+  <div class="pki-form">
+    <label>CA common name<input id="pki-ca-cn" value="pkcs11-proxy dev CA"></label>
+    <label>server CN<input id="pki-server-cn" value="pkcs11-proxy"></label>
+    <label>server SANs (comma-sep)<input id="pki-hosts" value="localhost, 127.0.0.1, ::1"></label>
+    <label>client names (comma-sep)<input id="pki-clients" value="dev-client"></label>
+    <label>leaf days<input id="pki-days" type="number" value="825"></label>
+  </div>
+  <div class="pki-actions">
+    <button id="pki-generate">generate bundle</button>
+    <span id="pki-result"></span>
+  </div>
+  <div id="pki-files"></div>
+</div></section>
+<footer>
+  Read-only operational view · all figures are secret-free broker counters ·
+  source <code>/dev/api/status</code> · polls every 1s, paused while tab hidden
+</footer>
+<script src="app.js"></script>
+</body>
+</html>

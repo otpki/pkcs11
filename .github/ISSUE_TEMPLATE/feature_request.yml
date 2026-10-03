@@ -1,0 +1,53 @@
+name: Feature request
+description: An idea for the driver, proxy, or tooling
+title: "[feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: TL;DR
+      description: The one-line version.
+      placeholder: "TL;DR: let a discovery entry select tokens by serial pattern"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is missing today and why it matters to you.
+    validations:
+      required: true
+
+  - type: textarea
+    id: build
+    attributes:
+      label: What to build
+      description: What it should do. A short list works well, and sketch the config or API if there is new surface.
+      placeholder: |
+        1. a `token_serial_pattern` field on discovery entries
+        2. matching tokens publish routes, the rest are skipped
+        3. docs and example YAML updated
+    validations:
+      required: true
+
+  - type: textarea
+    id: done
+    attributes:
+      label: Done means
+      description: How we can tell it works. A checklist is great.
+      placeholder: |
+        - [ ] matching tokens publish on the first listing
+        - [ ] a removed token disappears on the next listing
+        - [ ] go test ./... green on cgo and purego
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Out of scope notes, alternatives you tried, links to vendor docs or standards.
+    validations:
+      required: false

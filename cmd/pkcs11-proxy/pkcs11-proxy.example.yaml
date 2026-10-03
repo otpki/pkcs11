@@ -1,0 +1,181 @@
+# Example configuration for pkcs11-proxy.
+#
+# Scalar keys also work as flags and PKCS11_PROXY_* environment variables.
+# For example, otel.endpoint maps to --otel.endpoint and
+# PKCS11_PROXY_OTEL_ENDPOINT.
+#
+# Precedence: flag > environment > YAML > built-in default.
+# targets[] and discovery[] are YAML-only.
+#
+# The broker does not read the HSM PIN from this file. In the default
+# client-activated mode, clients supply the PIN when they log in.
+
+# Address used by proxy clients.
+listen: "127.0.0.1:9443"
+
+# How long existing clients may keep using a broker after it starts draining.
+# drain_timeout: "5m"
+
+# How long shutdown waits after draining. A native HSM call that never returns
+# cannot be interrupted, so the process exits after this deadline.
+# shutdown_timeout: "30s"
+
+# Allow plaintext TCP. Use this only for development.
+insecure: true
+
+# TLS settings. Set cert_file and key_file together. client_ca_file enables
+# mutual TLS and uses the verified client certificate as workload identity.
+#
+# For local testing:
+#   pkcs11-proxy pki init --dir ./pki
+# tls:
+#   cert_file: "./pki/server.pem"
+#   key_file: "./pki/server.key"
+#   client_ca_file: "./pki/ca.pem"
+
+# Static routes. Each route exposes exactly one token.
+#
+# Use the same module path more than once to publish several tokens from one
+# HSM. Use different module paths to front several HSMs from one broker.
+#
+# For development, module: "test" uses the in-memory PKCS #11 module. The test
+# token PIN is "1234".
+targets:
+  - # Public route name used by proxy.Target.Route.
+    name: "hsm"
+
+    # PKCS #11 shared library on the broker host.
+    module: "/opt/vendor/lib/libpkcs11.so"
+
+    # Select one token. An empty label picks the first token.
+    token_label: "mytoken"
+    # token_serial: "0102"
+    # slot_id: 0
+
+    # Vendor modules allowed for this route. An empty list enables all vendors
+    # compiled into the binary. Run `pkcs11-proxy vendors` to see them.
+    #
+    # Clients must use the same vendor set because parameter codecs are checked
+    # during the handshake.
+    vendors: []
+
+  # - name: "partition-b"
+  #   module: "/opt/vendor/lib/libpkcs11.so"
+  #   token_label: "partition-b"
+
+  # - name: "softhsm-dev"
+  #   module: "/usr/lib/softhsm/libsofthsm2.so"
+  #   token_label: "dev-token"
+
+  # - name: "fake-token"
+  #   module: "test"
+  #   token_label: "test-token-1"
+
+# discovery[] is an alternative to targets[]. It publishes one route for each
+# token currently reported by each listed module.
+#
+# Route IDs use the token serial, or the token label when serial is empty.
+# name_prefix helps avoid collisions between modules. Overrides can give a token
+# a fixed route name and patch its limits.
+#
+# Do not configure targets[] and discovery[] at the same time.
+# discovery:
+#   - module: "/opt/utimaco/lib/libcs_pkcs11_R3.so"
+#     name_prefix: "utimaco-"
+#     vendors: ["utimaco"]
+#     overrides:
+#       - name: "partition-alpha"
+#         token_serial: "0102"   # choose one of token_serial, token_label, slot_id
+#         sessions:
+#           max_physical_total: 4
+#         activation:
+#           failure_cooldown: "2s"
+#
+#   - module: "/opt/securosys/lib/libprimusP11.so"
+#     name_prefix: "primus-"
+#     vendors: ["securosys-primus"]
+
+sessions:
+  # Total native HSM sessions allowed for one route. This includes the control
+  # session, idle pooled sessions, active calls, and pinned sessions.
+  max_physical_total: 8
+
+  # Maximum read/write physical sessions.
+  max_physical_read_write: 4
+
+  # Maximum physical sessions that may stay pinned across requests. Multipart
+  # operations and session objects need pinned sessions.
+  max_pinned: 2
+
+  # Requests allowed to wait for physical capacity. Once this queue is full,
+  # new requests fail fast with a busy result.
+  max_queued: 64
+
+  # Logical clients retained by this broker route.
+  max_clients: 256
+
+  # Virtual sessions per logical client. A virtual session does not consume a
+  # physical HSM session until it is used.
+  max_virtual_sessions_per_client: 16
+
+  # Virtual object-handle mappings kept for one client.
+  max_objects_per_client: 1024
+
+  # Maximum wait for physical session capacity.
+  queue_timeout: "5s"
+
+activation:
+  # Cooldown after a failed physical activation. This keeps many racing clients
+  # from rapidly spending the HSM's PIN retry budget.
+  failure_cooldown: "1s"
+
+  # Allow a PIN changed directly on the HSM to replace the in-memory verifier
+  # after this interval. Zero disables out-of-band PIN rotation support.
+  #
+  # A failed rotation attempt can consume an HSM PIN retry, so keep this value
+  # large enough for the token's retry policy.
+  pin_rotation_interval: "0s"
+
+dev_ui:
+  # Read-only development dashboard with route health, activation state,
+  # capacity, clients, requests, and telemetry status.
+  enabled: false
+
+  # The UI has no authentication. It must stay on loopback unless allow_remote
+  # is explicitly enabled.
+  listen: "127.0.0.1:9463"
+  allow_remote: false
+
+# Optional liveness, readiness, and Prometheus listener:
+#   /healthz  process liveness
+#   /readyz   broker readiness and per-route health
+#   /metrics  Prometheus metrics
+#
+# This listener is also unauthenticated and defaults to loopback-only.
+# health:
+#   listen: "127.0.0.1:9464"
+#   allow_remote: false
+
+# Application logging. The writer uses a bounded queue so slow stderr output
+# does not block HSM requests.
+# logging:
+#   level: "info"       # debug | info | warn | error
+#   format: "text"      # text | json
+#   queue_size: 8192
+
+# Optional signed JSONL audit log. Records are sealed in Merkle batches and
+# signed with Ed25519 checkpoints.
+# audit:
+#   path: "./audit.log"
+#   key_file: "./audit.key"
+#   queue_size: 4096
+#   batch_size: 64
+#   checkpoint_interval: "30s"
+
+# Optional OpenTelemetry export over OTLP/HTTP. The library still records local
+# counters when export is disabled.
+# otel:
+#   endpoint: "otel-collector:4318"
+#   insecure: false
+#   service_name: "pkcs11-proxy"
+#   metric_interval: "15s"

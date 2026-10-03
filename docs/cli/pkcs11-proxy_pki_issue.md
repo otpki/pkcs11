@@ -1,0 +1,23 @@
+## pkcs11-proxy pki issue
+
+Issue an additional server or client certificate under an existing tree
+
+```
+pkcs11-proxy pki issue <server|client> [flags]
+```
+
+### Options
+
+```
+      --days int       leaf certificate validity in days (default 825)
+      --dir string     PKI directory holding ca.pem/ca.key (default "./pki")
+      --force          overwrite existing files
+  -h, --help           help for issue
+      --host strings   server SAN (DNS name or IP), repeat for more values
+      --name string    certificate common name (server hostname or client identity)
+```
+
+### SEE ALSO
+
+* [pkcs11-proxy pki](pkcs11-proxy_pki.md)	 - Create a development mTLS tree (CA, server certs, client certs)
+
