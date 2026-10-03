@@ -1,0 +1,56 @@
+name: Bug report
+description: Something is broken
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences. What broke and what you expected.
+      placeholder: "TL;DR: pkcs11-proxy refuses a good PIN after a restart, expected login to succeed"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+      description: Steps or a small code sample. The smaller the better.
+      placeholder: |
+        1. pkcs11-proxy serve --config proxy.yaml
+        2. client calls ListRoutes and picks a route
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Fill in the lines that apply.
+      placeholder: |
+        Version: pkcs11-proxy --version, or go list -m github.com/otpki/pkcs11
+        OS/arch: ex. Ubuntu 24.04 amd64
+        Backend: cgo or PureGo (CGO_ENABLED=0, -tags pkcs11_purego)
+        Middleware: ex. libcs_pkcs11_R3.so 6.6.0.0
+        HSM or simulator: ex. CryptoServer sim on 3001@127.0.0.1
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant output, if any. logging.level=debug on the broker helps. Remove PINs and credentials before pasting.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Workarounds, versions that used to work, related issues.
+    validations:
+      required: false

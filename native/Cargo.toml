@@ -1,0 +1,29 @@
+[package]
+name = "pkcs11-proxy-client"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "pkcs11_proxy_client"
+crate-type = ["cdylib"]
+
+[dependencies]
+base64 = "0.22"
+cryptoki-sys = "0.5"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+zeroize = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"
+# Keep unwinding: an internal Rust panic must not abort the application loading us.
+panic = "unwind"

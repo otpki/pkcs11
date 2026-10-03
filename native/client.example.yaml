@@ -1,0 +1,29 @@
+# This config belongs to the client library, not the proxy server.
+# On Linux, packages install it at /etc/pkcs11-proxy/client.yaml.
+# Elsewhere, set PKCS11_CLIENT_CONFIG to this file's full path.
+
+# Where the proxy listens. This is host:port, not an https:// URL.
+endpoint: "127.0.0.1:9443"
+
+# The route name published by the proxy. Leave empty only if it has one route.
+route: ""
+
+# PEM certificate authority used to check the proxy's TLS certificate.
+# Paths in this file are relative to the file itself.
+ca_file: "proxy-ca.pem"
+
+# Set both when the proxy requires a client certificate.
+# Keep the private key readable only by the account running your application.
+# cert_file: "client.pem"
+# key_file: "client-key.pem"
+
+# Set this when connecting to an IP whose certificate uses a DNS name.
+# server_name: "proxy.example.com"
+
+# Stop waiting for an RPC after this many seconds. Range: 1 to 300.
+# Increase this only for a slow HSM or slow network.
+timeout_seconds: 30
+
+# TLS is the default. Never enable plaintext on an untrusted network.
+# To test locally with insecure: true, also remove all TLS settings above.
+insecure: false

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/otpki/pkcs11/tree/master/docs
+    about: Proxy guide, vendor modules, and security notes. A good first stop for questions.
+  - name: Security
+    url: https://github.com/otpki/pkcs11/blob/master/docs/SECURITY.md
+    about: Please do not file vulnerabilities as public issues.
