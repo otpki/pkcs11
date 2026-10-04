@@ -11,7 +11,7 @@ name = "pkcs11_proxy_client"
 crate-type = ["cdylib"]
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 cryptoki-sys = "0.5"
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"
