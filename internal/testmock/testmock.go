@@ -163,14 +163,15 @@ type Module struct {
 var _ raw.Module = (*Module)(nil)
 
 type token struct {
-	slot     raw.SlotID
-	label    string
-	serial   string
-	pin      []byte
-	loggedIn bool
-	absent   bool // hot-unplugged: unlisted, unopenable, live sessions survive
-	objects  map[raw.ObjectHandle]*object
-	nextObj  raw.ObjectHandle
+	slot          raw.SlotID
+	label         string
+	serial        string
+	pin           []byte
+	loggedIn      bool
+	absent        bool // hot-unplugged: unlisted, unopenable, live sessions survive
+	uninitialized bool
+	objects       map[raw.ObjectHandle]*object
+	nextObj       raw.ObjectHandle
 }
 
 type object struct {
@@ -246,19 +247,23 @@ func (m *Module) require() error {
 // Slot numbers are never reused: a re-added token lands on a fresh slot even
 // when an earlier token was removed.
 func (m *Module) AddToken(label, serial string) raw.SlotID {
+	return m.addToken(&token{label: label, serial: serial, pin: []byte(DefaultPIN)})
+}
+
+// AddUninitializedToken inserts a slot whose token awaits C_InitToken.
+func (m *Module) AddUninitializedToken(serial string) raw.SlotID {
+	return m.addToken(&token{serial: serial, uninitialized: true})
+}
+
+// addToken places t on the next fresh slot with an empty object store.
+func (m *Module) addToken(t *token) raw.SlotID {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	slot := raw.SlotID(len(m.tokens) + 1)
-	t := &token{
-		slot:    slot,
-		label:   label,
-		serial:  serial,
-		pin:     []byte(DefaultPIN),
-		objects: make(map[raw.ObjectHandle]*object),
-		nextObj: 1,
-	}
+	t.slot = raw.SlotID(len(m.tokens) + 1)
+	t.objects = make(map[raw.ObjectHandle]*object)
+	t.nextObj = 1
 	m.tokens = append(m.tokens, t)
-	return slot
+	return t.slot
 }
 
 // RemoveToken ejects the token at slot: it disappears from token-present slot
@@ -615,13 +620,16 @@ func (m *Module) GetTokenInfo(slot raw.SlotID) (raw.TokenInfo, error) {
 		return raw.TokenInfo{}, raw.Error(raw.CKR_TOKEN_NOT_PRESENT)
 	}
 	count := t.sessionCount(m.sessions, false)
+	flags := raw.CKF_RNG | raw.CKF_LOGIN_REQUIRED | raw.CKF_SIGN | raw.CKF_DECRYPT
+	if !t.uninitialized {
+		flags |= raw.CKF_USER_PIN_INITIALIZED | raw.CKF_TOKEN_INITIALIZED
+	}
 	return raw.TokenInfo{
-		Label:          t.label,
-		ManufacturerID: "OTPKI Test",
-		Model:          "TEST-1",
-		SerialNumber:   t.serial,
-		Flags: raw.CKF_RNG | raw.CKF_LOGIN_REQUIRED | raw.CKF_USER_PIN_INITIALIZED |
-			raw.CKF_TOKEN_INITIALIZED | raw.CKF_SIGN | raw.CKF_DECRYPT,
+		Label:              t.label,
+		ManufacturerID:     "OTPKI Test",
+		Model:              "TEST-1",
+		SerialNumber:       t.serial,
+		Flags:              flags,
 		MaxSessionCount:    64,
 		SessionCount:       count,
 		MaxRwSessionCount:  64,

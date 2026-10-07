@@ -366,7 +366,7 @@ target generations are independent.
 There are two ways to publish routes:
 
 - `targets[]` names each route explicitly.
-- `discovery[]` lists modules and creates one route for each token found.
+- `discovery[]` lists modules and creates one route for each initialized token found.
 
 You cannot configure both at the same time.
 
@@ -387,9 +387,9 @@ discovery:
 Discovery reads token-present slots and token metadata. It does not open
 sessions or probe every mechanism just to build the route list.
 
-The broker reconciles discovery at startup and before route listings. A new
-token appears on the next listing. A removed token is unpublished while old
-in-flight work drains.
+The broker reconciles discovery at startup, before route listings and on each
+`/readyz` probe. A new token appears on the next listing. A removed token is
+unpublished while old in-flight work drains.
 
 Important route rules:
 
@@ -566,9 +566,9 @@ The root `pkcs11` package also emits managed-operation metrics through
 `/healthz` stays simple on purpose. A broken HSM does not make the process itself
 dead.
 
-`/readyz` returns 503 when the broker is draining. Route health is included in
-the response body so operators can see a bad token without necessarily taking
-all unrelated routes out of service.
+`/readyz` returns 503 when the broker is draining. Route health and a failed
+token discovery are included in the response body so operators can see a bad
+token or module without taking all unrelated routes out of service.
 
 The listener is unauthenticated and serves operational metadata. It must bind to
 loopback unless `health.allow_remote` is enabled.
