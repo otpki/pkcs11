@@ -919,6 +919,82 @@ func TestLastLogicalSessionCloseRevokesLoginAndPrivateHandles(t *testing.T) {
 	}
 }
 
+// Closing a managed client's last logical session ends its broker login.
+func TestManagedClientLogsInAgainAfterItsLastLogicalSessionCloses(t *testing.T) {
+	rejected := pkcs11.KeyPairOptions{
+		Algorithm:        pkcs11.AlgorithmRSA,
+		PublicAttributes: []*raw.Attribute{raw.NewAttribute(raw.CKA_MODULUS_BITS, uint(1024))},
+	}
+	for _, test := range []struct {
+		name             string
+		sessions         pkcs11.SessionConfig
+		closeLastSession func(context.Context, *testing.T, *pkcs11.Client)
+	}{
+		{
+			name: "failed key generation",
+			closeLastSession: func(ctx context.Context, t *testing.T, client *pkcs11.Client) {
+				t.Helper()
+				if _, err := client.GenerateKeyPair(ctx, rejected); !raw.IsError(err, raw.CKR_KEY_SIZE_RANGE) {
+					t.Fatalf("GenerateKeyPair(RSA-1024) = %v, want CKR_KEY_SIZE_RANGE", err)
+				}
+			},
+		},
+		{
+			name:             "idle timeout",
+			sessions:         pkcs11.SessionConfig{IdleTimeout: time.Millisecond},
+			closeLastSession: func(context.Context, *testing.T, *pkcs11.Client) { time.Sleep(10 * time.Millisecond) },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			config := testmockBrokerConfig(testmock.SharedSource{Name: t.Name(), Module: testmock.New(t.Name(), 1)})
+			config.Login = LoginPolicy{
+				Mode:             PhysicalLoginClientActivated,
+				Authenticate:     func(context.Context, LoginAttempt) error { return nil },
+				AllowedUserTypes: []uint{raw.CKU_USER},
+			}
+			_, address := newTestmockBroker(t, config)
+			client, err := pkcs11.Open(ctx, pkcs11.Config{
+				Module:   RemoteModule(haTarget(address)),
+				PIN:      pkcs11.StaticPIN(testmock.DefaultPIN),
+				Login:    pkcs11.LoginConfig{Mode: pkcs11.LoginLazy},
+				Sessions: test.sessions,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = client.Close(ctx) })
+			if err := createPrivateObject(ctx, client); err != nil {
+				t.Fatalf("first session: %v", err)
+			}
+			test.closeLastSession(ctx, t, client)
+			if err := createPrivateObject(ctx, client); err != nil {
+				t.Fatalf("session after the last one closed: %v", err)
+			}
+		})
+	}
+}
+
+// createPrivateObject needs a logged-in read/write session. It fails on a
+// session in the public state.
+func createPrivateObject(ctx context.Context, client *pkcs11.Client) error {
+	return client.WithRawSession(ctx, pkcs11.RawSessionOptions{ReadWrite: true}, func(module raw.Module, session raw.SessionHandle) error {
+		info, err := module.GetSessionInfo(session)
+		if err != nil {
+			return err
+		}
+		var stateErr error
+		if info.State != raw.State(raw.CKS_RW_USER_FUNCTIONS) {
+			stateErr = fmt.Errorf("session state = %d, want CKS_RW_USER_FUNCTIONS", info.State)
+		}
+		_, createErr := module.CreateObject(session, []*raw.Attribute{
+			raw.NewAttribute(raw.CKA_CLASS, raw.CKO_DATA),
+			raw.NewAttribute(raw.CKA_PRIVATE, true),
+		})
+		return errors.Join(stateErr, createErr)
+	})
+}
+
 func TestDroppedNonIdempotentResponseUsesDedupLedger(t *testing.T) {
 	harness := newProxyHarness(t, SessionBudget{MaxPhysicalTotal: 4}, nil)
 	client := openRemoteRaw(t, harness.target)

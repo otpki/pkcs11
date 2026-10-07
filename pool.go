@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -621,6 +622,29 @@ func (p *sessionPool) loginDirect(ctx context.Context, item pooledSession, purpo
 		return fmt.Errorf("pkcs11: login: %w", err)
 	}
 	return nil
+}
+
+// loginConfirmed checks the remembered login against the token. The token logs
+// the application out when its last session closes.
+func (p *sessionPool) loginConfirmed(ctx context.Context, item pooledSession, userType uint) bool {
+	states, ok := loginStates[userType]
+	if !ok {
+		return false
+	}
+	var info raw.SessionInfo
+	err := p.execute(ctx, item.worker, func(module raw.Module) error {
+		var err error
+		info, err = module.GetSessionInfo(item.handle)
+		return err
+	})
+	return err == nil && slices.Contains(states, info.State)
+}
+
+// loginStates maps a user type to the session states that show its login.
+// A context-specific login leaves the session state unchanged.
+var loginStates = map[uint][]raw.State{
+	raw.CKU_SO:   {raw.State(raw.CKS_RW_SO_FUNCTIONS)},
+	raw.CKU_USER: {raw.State(raw.CKS_RO_USER_FUNCTIONS), raw.State(raw.CKS_RW_USER_FUNCTIONS)},
 }
 
 // ContextLogin performs a context-specific login for an already leased session,

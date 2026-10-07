@@ -389,6 +389,10 @@ func (t *token) sessionCount(sessions map[raw.SessionHandle]*session, rw bool) u
 	return count
 }
 
+func (t *token) hasSessions(sessions map[raw.SessionHandle]*session) bool {
+	return t.sessionCount(sessions, false) > 0
+}
+
 func (s *session) clearOperations() {
 	s.find, s.digest = nil, nil
 	s.signKey, s.verify = nil, nil
@@ -696,7 +700,8 @@ func (m *Module) OpenSession(slot raw.SlotID, flags uint) (raw.SessionHandle, er
 	return handle, nil
 }
 
-// CloseSession destroys the session and any session objects it owns.
+// CloseSession destroys the session and any session objects it owns. Closing
+// the token's last session also logs the application out.
 func (m *Module) CloseSession(handle raw.SessionHandle) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -710,14 +715,19 @@ func (m *Module) CloseSession(handle raw.SessionHandle) error {
 		}
 	}
 	delete(m.sessions, handle)
+	if !t.hasSessions(m.sessions) {
+		t.loggedIn = false
+	}
 	return nil
 }
 
-// CloseAllSessions destroys every session on the slot.
+// CloseAllSessions destroys every session on the slot and logs the application
+// out.
 func (m *Module) CloseAllSessions(slot raw.SlotID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, err := m.lookup(slot); err != nil {
+	t, err := m.lookup(slot)
+	if err != nil {
 		return err
 	}
 	for h, s := range m.sessions {
@@ -725,6 +735,7 @@ func (m *Module) CloseAllSessions(slot raw.SlotID) error {
 			delete(m.sessions, h)
 		}
 	}
+	t.loggedIn = false
 	return nil
 }
 

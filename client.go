@@ -737,7 +737,12 @@ func (c *Client) withSession(ctx context.Context, options sessionOptions, fn fun
 			}()
 		}
 		action := classifyDeviceError(c.currentDevice(), last, policy.RetryGeneralErrors)
-		if last == nil || attempt >= policy.MaxAttempts || action == RecoveryNone {
+		finalAttempt := attempt >= policy.MaxAttempts
+		if action == RecoveryRelogin && finalAttempt {
+			// Idle sessions may have lost the same login.
+			c.invalidateState(ctx)
+		}
+		if last == nil || finalAttempt || action == RecoveryNone {
 			return last
 		}
 		if recoveryErr := c.recover(ctx, action); recoveryErr != nil {
@@ -762,10 +767,7 @@ func (c *Client) withSession(ctx context.Context, options sessionOptions, fn fun
 func (c *Client) recover(ctx context.Context, action RecoveryAction) error {
 	// Invalidate first so no concurrent acquisition can reuse a session, login
 	// assumption, or object handle from before recovery.
-	c.roPool.Invalidate(ctx)
-	c.rwPool.Invalidate(ctx)
-	c.cache.invalidate()
-	c.login.reset()
+	c.invalidateState(ctx)
 	if action == RecoveryRelogin {
 		return nil
 	}

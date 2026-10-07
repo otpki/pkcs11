@@ -73,7 +73,7 @@ func (c *loginCoordinator) ensure(ctx context.Context, pool *sessionPool, item p
 	generation := pool.module.currentGeneration()
 	// Reinitialization invalidates any remembered application-login state even
 	// when the token continues to expose the same slot and identity.
-	if entry.loggedIn && entry.generation == generation {
+	if entry.loggedIn && entry.generation == generation && pool.loginConfirmed(ctx, item, userType) {
 		return nil
 	}
 	if err := pool.loginDirect(ctx, item, purpose, userType); err != nil {
