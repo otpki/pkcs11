@@ -21,8 +21,9 @@ import (
 	"github.com/otpki/pkcs11/vendors/all"
 )
 
-// discoverySpec enables one route per token reported by a module. The route set is refreshed at
-// startup and before ListRoutes. Overrides can change settings for selected discovered tokens.
+// discoverySpec enables one route per initialized token reported by a module. The route set is
+// refreshed at startup, before ListRoutes and on each /readyz probe. Overrides can change settings
+// for selected discovered tokens.
 type discoverySpec struct {
 	// Module is the vendor library path or "test[:<name>[:<tokens>]]" scheme,
 	// exactly as a target's module field.
@@ -38,12 +39,14 @@ type discoverySpec struct {
 	// Overrides give individual tokens a fixed route name and patched
 	// template fields; each must select exactly one token at startup.
 	Overrides []discoveryOverride `mapstructure:"overrides"`
-	// RefreshInterval bounds how often a ListRoutes request re-enumerates the
-	// module: listings within the interval serve the published catalog without
-	// touching the HSM. Zero selects the default (5s); a negative value
-	// reconciles on every listing, the pre-interval behavior.
+	// RefreshInterval bounds how often a refresh re-enumerates the module: a
+	// refresh within the interval reuses the last result without touching the
+	// HSM. Zero selects defaultRefreshInterval; a negative value enumerates on
+	// every refresh.
 	RefreshInterval time.Duration `mapstructure:"refresh_interval"`
 }
+
+const defaultRefreshInterval = 5 * time.Second
 
 // discoveryOverride names one discovered token and patches its template.
 // Exactly one of TokenSerial, TokenLabel, or SlotID selects the token.
@@ -193,26 +196,38 @@ type desiredRoute struct {
 	sessions   sessionSpec
 	activation activationSpec
 	revision   string
-	// binding identifies the token instance the route points at; when the
-	// desired binding differs from the published one the route is rebuilt so
-	// clients observe a new epoch rather than a silent rebind.
-	binding string
+	binding    string // slotBinding of the route's token
 }
 
-// publishedRoute is the reconciler's record of a live route.
+func (r desiredRoute) record() publishedRoute {
+	return publishedRoute{binding: r.binding, revision: r.revision}
+}
+
+// publishedRoute is the reconciler's record of a live route. A desired route
+// with a different record is rebuilt, so clients observe a new epoch.
 type publishedRoute struct {
-	binding string
+	binding  string
+	revision string
 }
 
 // reconcileCall is the singleflight record: one in-flight enumeration whose
-// result every concurrent listing shares.
+// result every concurrent caller shares.
 type reconcileCall struct {
 	done chan struct{}
 	err  error
 }
 
+func (c *reconcileCall) wait(ctx context.Context) error {
+	select {
+	case <-c.done:
+		return c.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // discoverer reconciles the published route set with the tokens the module
-// reports. One reconciliation runs at a time; concurrent listings wait for
+// reports. One reconciliation runs at a time; concurrent callers wait for
 // it and share its result.
 type discoverer struct {
 	moduleSpec string
@@ -233,11 +248,11 @@ type discoverer struct {
 	mu       sync.Mutex
 	inflight *reconcileCall
 	// lastRun/lastErr cache the completed reconciliation for refreshInterval,
-	// so steady listings serve the catalog without re-enumerating the module.
+	// so steady refreshes serve the catalog without re-enumerating the module.
 	lastRun time.Time
 	lastErr error
 	// refreshInterval is the max-age window for lastRun; negative disables
-	// caching so every listing reconciles.
+	// caching so every refresh reconciles.
 	refreshInterval time.Duration
 	// published is only touched by the goroutine running reconcileOnce: the
 	// singleflight above guarantees there is at most one.
@@ -260,7 +275,7 @@ func newDiscoverer(spec *discoverySpec, source pkcs11.ModuleSource, vendors []pk
 	}
 	refreshInterval := spec.RefreshInterval
 	if refreshInterval == 0 {
-		refreshInterval = 5 * time.Second
+		refreshInterval = defaultRefreshInterval
 	}
 	d := &discoverer{
 		moduleSpec:      spec.Module,
@@ -283,25 +298,15 @@ func newDiscoverer(spec *discoverySpec, source pkcs11.ModuleSource, vendors []pk
 
 func (d *discoverer) attach(server *proxy.Server) { d.server = server }
 
-// reconcile is the BeforeListRoutes hook: it runs one enumeration at a time
-// and lets concurrent listings share the result. Callers that arrive while a
-// reconciliation is in flight wait for it; a call that arrives once the slot
-// is free starts the next one.
+// reconcile is the BeforeListRoutes hook, and concurrent callers share one
+// enumeration. Each caller stops waiting when its ctx ends.
 func (d *discoverer) reconcile(ctx context.Context) error {
 	d.mu.Lock()
 	if call := d.inflight; call != nil {
 		d.mu.Unlock()
-		select {
-		case <-call.done:
-			return call.err
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		return call.wait(ctx)
 	}
-	// A listing inside the refresh window serves the published catalog as-is.
-	// Token churn is rare relative to listing frequency, and enumeration can
-	// cost hundreds of milliseconds per slot probe on slow modules.
-	if d.refreshInterval >= 0 && !d.lastRun.IsZero() && time.Since(d.lastRun) < d.refreshInterval {
+	if d.lastResultFreshLocked() {
 		err := d.lastErr
 		d.mu.Unlock()
 		return err
@@ -309,17 +314,30 @@ func (d *discoverer) reconcile(ctx context.Context) error {
 	call := &reconcileCall{done: make(chan struct{})}
 	d.inflight = call
 	d.mu.Unlock()
+	// The enumeration runs detached from every caller. A module hung in a
+	// native call then holds one goroutine, and each caller answers by its own deadline.
+	go d.settle(context.WithoutCancel(ctx), call)
+	return call.wait(ctx)
+}
 
-	defer func() {
-		d.mu.Lock()
-		d.inflight = nil
-		d.lastRun = time.Now()
-		d.lastErr = call.err
-		d.mu.Unlock()
-		close(call.done)
-	}()
+// lastResultFreshLocked lets a refresh reuse lastErr, since token churn is rare
+// and enumeration can cost hundreds of milliseconds per slot probe.
+func (d *discoverer) lastResultFreshLocked() bool {
+	cachingEnabled := d.refreshInterval >= 0
+	ranOnce := !d.lastRun.IsZero()
+	return cachingEnabled && ranOnce && time.Since(d.lastRun) < d.refreshInterval
+}
+
+// settle runs reconcileOnce, caches its result for refreshInterval and
+// releases the call's waiters.
+func (d *discoverer) settle(ctx context.Context, call *reconcileCall) {
 	call.err = d.reconcileOnce(ctx, false)
-	return call.err
+	d.mu.Lock()
+	d.inflight = nil
+	d.lastRun = time.Now()
+	d.lastErr = call.err
+	d.mu.Unlock()
+	close(call.done)
 }
 
 // reconcileStartup performs the first reconciliation with the additional
@@ -345,6 +363,7 @@ func (d *discoverer) reconcileOnce(ctx context.Context, startup bool) error {
 			"module", d.moduleSpec, "error", err)
 		return fmt.Errorf("enumerate tokens on %s: %w", d.moduleSpec, err)
 	}
+	summaries = d.withoutUninitialized(summaries)
 	if startup {
 		if err := d.validateOverrideMatches(summaries); err != nil {
 			return err
@@ -353,17 +372,16 @@ func (d *discoverer) reconcileOnce(ctx context.Context, startup bool) error {
 	desired := d.plan(summaries)
 
 	published := maps.Clone(d.published)
-	// Publish first: a listing during reconciliation sees the new routes
-	// before any retired one disappears.
+	// Publish first: a listing during reconciliation sees new IDs before
+	// vanished ones disappear. A rebuilt ID is absent between its retire and
+	// its AddTarget.
 	for id, want := range desired {
-		if current, ok := published[id]; ok && current.binding == want.binding {
+		current, ok := published[id]
+		if ok && current == want.record() {
 			continue
 		}
-		if _, ok := published[id]; ok {
-			// Same route ID, different token binding: retire so the
-			// replacement publishes a fresh epoch. Retire unpublishes at
-			// once while the old target drains in the background.
-			d.retire(server, id) //nolint:contextcheck // The drain detaches to the server's work context, not the listing's.
+		if ok {
+			d.retire(server, id) //nolint:contextcheck // The drain runs on the server's work context.
 		}
 		config := d.targetConfig(want)
 		if err := server.AddTarget(ctx, config); err != nil {
@@ -373,11 +391,11 @@ func (d *discoverer) reconcileOnce(ctx context.Context, startup bool) error {
 				"route", id, "module", d.moduleSpec, "slot", want.slot, "error", err)
 			continue
 		}
-		d.published[id] = publishedRoute{binding: want.binding}
+		d.published[id] = want.record()
 	}
 	for id := range published {
 		if _, ok := desired[id]; !ok {
-			d.retire(server, id) //nolint:contextcheck // The drain detaches to the server's work context, not the listing's.
+			d.retire(server, id) //nolint:contextcheck // The drain runs on the server's work context.
 		}
 	}
 	return nil
@@ -395,19 +413,41 @@ func (d *discoverer) retire(server *proxy.Server, id string) {
 	}()
 }
 
+// withoutUninitialized drops, in place, the tokens awaiting C_InitToken, such as
+// SoftHSM's free slot, since login needs an initialized token.
+func (d *discoverer) withoutUninitialized(summaries []pkcs11.TokenSummary) []pkcs11.TokenSummary {
+	return slices.DeleteFunc(summaries, func(summary pkcs11.TokenSummary) bool {
+		if !uninitialized(summary) {
+			return false
+		}
+		slog.Debug("uninitialized token skipped", "module", d.moduleSpec, "slot", summary.SlotID)
+		return true
+	})
+}
+
+// uninitialized reports a readable token that awaits C_InitToken.
+func uninitialized(summary pkcs11.TokenSummary) bool {
+	return summary.Err == nil && summary.Token.Flags&raw.CKF_TOKEN_INITIALIZED == 0
+}
+
+// initialized reports a readable token that C_InitToken has set up.
+func initialized(summary pkcs11.TokenSummary) bool {
+	return summary.Err == nil && summary.Token.Flags&raw.CKF_TOKEN_INITIALIZED != 0
+}
+
 // validateOverrideMatches enforces the startup contract: every override must
-// select exactly one currently-readable token.
+// select exactly one readable, initialized token.
 func (d *discoverer) validateOverrideMatches(summaries []pkcs11.TokenSummary) error {
 	for i := range d.overrides {
 		override := &d.overrides[i]
 		matched := 0
 		for _, summary := range summaries {
-			if summary.Err == nil && override.matches(summary) {
+			if initialized(summary) && override.matches(summary) {
 				matched++
 			}
 		}
 		if matched != 1 {
-			return fmt.Errorf("discovery override %q matches %d tokens: it must select exactly one of the tokens reported by %s",
+			return fmt.Errorf("discovery override %q matches %d tokens: it must select exactly one of the initialized tokens reported by %s",
 				override.Name, matched, d.moduleSpec)
 		}
 	}
@@ -459,8 +499,6 @@ func (d *discoverer) plan(summaries []pkcs11.TokenSummary) map[string]desiredRou
 		if shared(summary, route.selector) {
 			slot := summary.SlotID
 			route.selector.SlotID = &slot
-			route.binding = fmt.Sprintf("slot=%d\x00sn=%s\x00lb=%s",
-				slot, strings.TrimSpace(summary.Token.SerialNumber), strings.TrimSpace(summary.Token.Label))
 			route.revision = d.revision(route)
 		}
 		byID[route.id] = append(byID[route.id], route)
@@ -514,17 +552,15 @@ func (d *discoverer) routeFor(summary pkcs11.TokenSummary) desiredRoute {
 			return route
 		}
 	}
-	// The binding captures the token instance this route resolved to. For a
-	// slot selector the token content defines identity (the operator asked
-	// for "whatever occupies this slot"); for serial or label selectors the
-	// identity follows the token across slot moves.
-	if route.selector.SlotID != nil {
-		route.binding = fmt.Sprintf("slot=%d\x00sn=%s\x00lb=%s", summary.SlotID, serial, label)
-	} else {
-		route.binding = fmt.Sprintf("sn=%s\x00lb=%s", serial, label)
-	}
+	route.binding = slotBinding(summary)
 	route.revision = d.revision(route)
 	return route
+}
+
+// slotBinding identifies a token by its slot as well as serial and label.
+func slotBinding(summary pkcs11.TokenSummary) string {
+	return fmt.Sprintf("slot=%d\x00sn=%s\x00lb=%s", summary.SlotID,
+		strings.TrimSpace(summary.Token.SerialNumber), strings.TrimSpace(summary.Token.Label))
 }
 
 // revision derives a short stable digest from everything that defines the
@@ -573,10 +609,8 @@ func (d *discoverer) targetConfig(route desiredRoute) proxy.TargetConfig {
 }
 
 // reconcilerSet fans the BeforeListRoutes hook out to each configured
-// module's discoverer in config order. One module's failed enumeration keeps
-// its last published routes without suppressing reconciliation of the others;
-// the listing still answers the merged catalog and the joined error surfaces
-// through the hook's warning path.
+// module's discoverer. A failing module keeps its last
+// published routes, and the hook returns the joined errors.
 type reconcilerSet []*discoverer
 
 func (set reconcilerSet) reconcile(ctx context.Context) error {

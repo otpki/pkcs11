@@ -37,9 +37,6 @@ func (s *sessionLease) call(ctx context.Context, operation string, fn func(raw.M
 	}
 	s.uses.Add(1)
 	err = s.pool.execute(ctx, s.worker, fn)
-	// Vendor-defined return values are normalized to their standard CKR_*
-	// equivalent before recovery classification and callers examine them.
-	err = translateDeviceError(device, err)
 	// Any error that triggers managed recovery also makes this concrete session
 	// unsafe to return to the pool, even if the high-level caller will not retry.
 	if classifyDeviceError(device, err, false) != RecoveryNone {

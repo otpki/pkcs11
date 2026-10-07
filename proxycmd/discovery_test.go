@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -95,6 +96,29 @@ func (h *discoveryHarness) listRoutes(t *testing.T) []proxy.RouteInfo {
 	return listDiscoveryRoutes(t, h.address)
 }
 
+// openRoute opens a manually activated client on a discovered route.
+func (h *discoveryHarness) openRoute(t *testing.T, route proxy.RouteInfo) *pkcs11.Client {
+	t.Helper()
+	client, err := pkcs11.Open(context.Background(), pkcs11.Config{
+		Module: proxy.RemoteModule(proxy.Target{
+			ConfigID:          "discovery-test",
+			Revision:          route.Revision,
+			Endpoints:         []string{h.address},
+			Route:             route.ID,
+			SecurityContextID: "discovery-test",
+			AllowInsecure:     true,
+			Auth:              func(context.Context) ([]byte, error) { return []byte("workload"), nil },
+		}),
+		Login: pkcs11.LoginConfig{Mode: pkcs11.LoginManual},
+		PIN:   pkcs11.StaticPIN(testmock.DefaultPIN),
+	})
+	if err != nil {
+		t.Fatalf("open route %q: %v", route.ID, err)
+	}
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
+	return client
+}
+
 func defaultOptions(t *testing.T) options {
 	t.Helper()
 	cfg, err := loadOptions(nil)
@@ -159,6 +183,81 @@ func TestDiscoveryReflectsRuntimeTokenChanges(t *testing.T) {
 	got = routeIDs(h.listRoutes(t))
 	if len(got) != 1 || got[0] != "TEST-DISCO-EXTRA" {
 		t.Fatalf("after remove routes = %v, want [TEST-DISCO-EXTRA]", got)
+	}
+}
+
+// A token that moves to another slot between two listings is served at its
+// new slot after the second listing.
+func TestDiscoveredRouteFollowsTokenToNewSlot(t *testing.T) {
+	cfg := defaultOptions(t)
+	cfg.Insecure = true
+	h := newDiscoveryHarness(t, testmock.New("move", 1), &discoverySpec{Module: "test:move", RefreshInterval: -1}, cfg)
+	h.listRoutes(t)
+	if err := h.module.RemoveToken(1); err != nil {
+		t.Fatal(err)
+	}
+	slot := h.module.AddToken("move-token-1", "TEST-MOVE-0001")
+
+	routes := h.listRoutes(t)
+	if len(routes) != 1 || routes[0].SlotID != slot {
+		t.Fatalf("routes = %+v, want TEST-MOVE-0001 at slot %d", routes, slot)
+	}
+	client := h.openRoute(t, routes[0])
+	if err := client.Activate(context.Background()); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	if _, err := client.Random(context.Background(), 16); err != nil {
+		t.Fatalf("random at the new slot: %v", err)
+	}
+}
+
+// An uninitialized token, such as SoftHSM's free slot, publishes a route only
+// after C_InitToken.
+func TestDiscoverySkipsUninitializedTokens(t *testing.T) {
+	cfg := defaultOptions(t)
+	cfg.Insecure = true
+	module := testmock.New("fresh", 1)
+	free := module.AddUninitializedToken("TEST-FRESH-FREE")
+	h := newDiscoveryHarness(t, module, &discoverySpec{Module: "test:fresh", RefreshInterval: -1}, cfg)
+
+	if got := routeIDs(h.listRoutes(t)); len(got) != 1 || got[0] != "TEST-FRESH-0001" {
+		t.Fatalf("routes = %v, want [TEST-FRESH-0001]", got)
+	}
+	if err := module.InitToken(free, []byte(testmock.DefaultPIN), "fresh-token-free"); err != nil {
+		t.Fatal(err)
+	}
+	if got := routeIDs(h.listRoutes(t)); !slices.Equal(got, []string{"TEST-FRESH-0001", "TEST-FRESH-FREE"}) {
+		t.Fatalf("routes after init = %v, want [TEST-FRESH-0001 TEST-FRESH-FREE]", got)
+	}
+}
+
+// A published route is rebuilt with its slot pinned once another token shares
+// its serial. Its revision changes.
+func TestDiscoveredRoutePinsSlotWhenSerialBecomesShared(t *testing.T) {
+	cfg := defaultOptions(t)
+	cfg.Insecure = true
+	spec := &discoverySpec{
+		Module:          "test:pin",
+		RefreshInterval: -1,
+		Overrides:       []discoveryOverride{{Name: "pin-alpha", TokenLabel: "pin-token-1"}},
+	}
+	h := newDiscoveryHarness(t, testmock.New("pin", 1), spec, cfg)
+	if err := h.module.RemoveToken(1); err != nil {
+		t.Fatal(err)
+	}
+	h.module.AddToken("pin-token-b", "TEST-PIN-0001")
+	unpinned := h.listRoutes(t)
+	if len(unpinned) != 1 || unpinned[0].ID != "TEST-PIN-0001" {
+		t.Fatalf("routes = %v, want [TEST-PIN-0001]", routeIDs(unpinned))
+	}
+
+	h.module.AddToken("pin-token-1", "TEST-PIN-0001")
+	pinned := h.listRoutes(t)
+	if got := routeIDs(pinned); !slices.Equal(got, []string{"TEST-PIN-0001", "pin-alpha"}) {
+		t.Fatalf("routes = %v, want [TEST-PIN-0001 pin-alpha]", got)
+	}
+	if pinned[0].Revision == unpinned[0].Revision {
+		t.Fatalf("route %q kept revision %q after its serial became shared", pinned[0].ID, pinned[0].Revision)
 	}
 }
 
@@ -576,14 +675,14 @@ func TestDiscoveryIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enumerate %s: %v", modulePath, err)
 	}
-	healthy := 0
+	routable := 0
 	for _, summary := range want {
-		if summary.Err == nil {
-			healthy++
+		if initialized(summary) {
+			routable++
 		}
 	}
-	if healthy == 0 {
-		t.Skip("module reports no readable tokens")
+	if routable == 0 {
+		t.Skip("module reports no initialized tokens")
 	}
 
 	cfg := defaultOptions(t)
@@ -617,8 +716,8 @@ func TestDiscoveryIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(routes) != healthy {
-		t.Fatalf("catalog = %v, want %d routes (one per readable token)", routeIDs(routes), healthy)
+	if len(routes) != routable {
+		t.Fatalf("catalog = %v, want %d routes (one per initialized token)", routeIDs(routes), routable)
 	}
 	for _, route := range routes {
 		if route.Revision == "" || route.Revision == targetRevision {

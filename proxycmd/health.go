@@ -4,26 +4,29 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"time"
 
 	"github.com/otpki/pkcs11/proxy"
+	"github.com/otpki/pkcs11/raw"
 )
 
 // healthProbeTimeout bounds how long /readyz and the dev UI wait for per-route
-// probes. A module hung inside a native call reports its route unhealthy at
-// this deadline instead of holding the request; the shared probe keeps running
-// in the background, capped at one goroutine per route.
+// probes, and /readyz for discovery. A module hung inside a native call
+// reports its route unhealthy at this deadline instead of holding the request;
+// the shared probe keeps running in the background, capped at one goroutine per route.
 const healthProbeTimeout = 5 * time.Second
 
-// healthSource is the slice of *proxy.Server the health listener reads: the
+// healthSource is the slice of *proxy.Server the health listener uses: the
 // lifecycle state for the readiness decision, the bound broker address for
-// "the listener serves", and the per-route probe results.
+// "the listener serves", discovery, and the per-route probe results.
 type healthSource interface {
 	State() proxy.ServerState
 	Addr() net.Addr
+	RefreshRoutes(context.Context) error
 	Health(context.Context) []proxy.TargetHealth
 }
 
@@ -31,15 +34,15 @@ type healthSource interface {
 // carries status, activation, and per-check outcomes only — never PINs,
 // module paths, object identities, or payloads.
 type readyzResponse struct {
-	Ready    bool                 `json:"ready"`
-	State    string               `json:"state"`
-	Listener string               `json:"listener,omitempty"`
-	Routes   []proxy.TargetHealth `json:"routes"`
+	Ready          bool                 `json:"ready"`
+	State          string               `json:"state"`
+	Listener       string               `json:"listener,omitempty"`
+	DiscoveryError string               `json:"discovery_error,omitempty"`
+	Routes         []proxy.TargetHealth `json:"routes"`
 }
 
 // healthServer serves the unauthenticated probe and metrics endpoints used by
-// orchestrators. It holds no broker privileges of its own: every answer comes
-// from healthSource reads and the shared request handler.
+// orchestrators. It sees the broker only through healthSource.
 type healthServer struct {
 	source       healthSource
 	metrics      http.Handler
@@ -60,23 +63,28 @@ func (h *healthServer) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	}))
-	// Readiness reflects routing truth: active plus the broker listener bound
-	// means 200; draining (or a not-yet-bound listener) means 503 so the
-	// orchestrator stops routing before the drain timeout. One sick route
-	// shows in the body but leaves the status at 200 — health is per route.
+	// Draining and a failed discovery answer 503: the orchestrator must stop
+	// routing before the drain timeout, and the failing module's routes may be
+	// stale. One sick route shows only in the body.
 	mux.Handle("GET /readyz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		probeCtx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 		state := h.source.State()
 		listener := h.source.Addr()
-		ready := state == proxy.ServerActive && listener != nil
+		discovered := startDiscovery(probeCtx, h.source)
+		routes := h.source.Health(probeCtx)
+		discoveryErr := <-discovered
+		ready := state == proxy.ServerActive && listener != nil && discoveryErr == nil
 		body := readyzResponse{
 			Ready:  ready,
 			State:  state.String(),
-			Routes: h.source.Health(probeCtx),
+			Routes: routes,
 		}
 		if listener != nil {
 			body.Listener = listener.String()
+		}
+		if discoveryErr != nil {
+			body.DiscoveryError = discoveryFailure(discoveryErr)
 		}
 		payload, err := json.MarshalIndent(body, "", "  ")
 		if err != nil {
@@ -93,6 +101,30 @@ func (h *healthServer) Handler() http.Handler {
 		mux.Handle("GET /metrics", h.metrics)
 	}
 	return securityHeaders(mux)
+}
+
+// startDiscovery refreshes the routes beside the route probes, which keep their
+// full deadline when a module hangs. The probes can see the catalog from before
+// this refresh.
+func startDiscovery(ctx context.Context, source healthSource) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- source.RefreshRoutes(ctx) }()
+	return done
+}
+
+const unclassifiedDiscoveryError = "discovery failed"
+
+// discoveryFailure names a failed discovery by its PKCS #11 return value, its
+// deadline, or unclassifiedDiscoveryError. The full error carries module paths,
+// which the payload omits.
+func discoveryFailure(err error) string {
+	if code, ok := errors.AsType[raw.Error](err); ok {
+		return code.Error()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded.Error()
+	}
+	return unclassifiedDiscoveryError
 }
 
 // healthListener is the bound health HTTP server. Unlike the dev UI it is not

@@ -119,9 +119,8 @@ type ServerConfig struct {
 	// closed. Clients that linger past the deadline observe ErrTargetLost when
 	// the process finally stops. Zero selects the default.
 	DrainTimeout time.Duration
-	// BeforeListRoutes runs before the route catalog is returned. It can refresh discovered tokens so
-	// new or removed tokens show up in ListRoutes. Errors are logged and the last known catalog is
-	// still returned.
+	// BeforeListRoutes refreshes discovered tokens, so new or removed tokens show up in the catalog.
+	// RefreshRoutes runs it for each route listing and for other callers such as a readiness probe.
 	BeforeListRoutes func(context.Context) error
 	// HealthMaxAge bounds reuse of a target's last health probe result by
 	// TargetHealth and Health. Concurrent callers share one in-flight probe
@@ -380,6 +379,15 @@ func (server *Server) RouteCatalog() []RouteInfo {
 	return routes
 }
 
+// RefreshRoutes runs the optional BeforeListRoutes hook, which refreshes
+// discovered routes.
+func (server *Server) RefreshRoutes(ctx context.Context) error {
+	if server == nil || server.config.BeforeListRoutes == nil {
+		return nil
+	}
+	return server.config.BeforeListRoutes(ctx)
+}
+
 // sortedTargets returns all configured targets ordered by route ID. It is the
 // shared iteration source for the unfiltered operator catalog and the
 // per-caller authorized listing.
@@ -397,11 +405,9 @@ func (server *Server) sortedTargets() []*brokerTarget {
 // routeCatalogResponse builds the @routes response for one authenticated caller. Each target can
 // hide itself through its authorization callback, including its token label and serial.
 func (server *Server) routeCatalogResponse(ctx context.Context, identity RequestIdentity, clientID [16]byte) response {
-	if hook := server.config.BeforeListRoutes; hook != nil {
-		if err := hook(ctx); err != nil {
-			emitWarnLog(ctx, "pkcs11 proxy: route reconciliation failed; answering last published catalog",
-				attribute.String("error", err.Error()))
-		}
+	if err := server.RefreshRoutes(ctx); err != nil {
+		emitWarnLog(ctx, "pkcs11 proxy: route reconciliation failed; answering last published catalog",
+			attribute.String("error", err.Error()))
 	}
 	resp := response{Version: protocolVersion}
 	targets := server.sortedTargets()

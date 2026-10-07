@@ -33,9 +33,10 @@ import (
 // fakeHealthSource drives the health handler without a live broker. State and
 // addr are atomic because handler goroutines read them while the test mutates.
 type fakeHealthSource struct {
-	state  atomic.Int32
-	addr   atomic.Pointer[net.TCPAddr]
-	health func(context.Context) []proxy.TargetHealth
+	state      atomic.Int32
+	addr       atomic.Pointer[net.TCPAddr]
+	health     func(context.Context) []proxy.TargetHealth
+	refreshErr error
 }
 
 func (f *fakeHealthSource) State() proxy.ServerState {
@@ -48,6 +49,8 @@ func (f *fakeHealthSource) Addr() net.Addr {
 	}
 	return nil
 }
+
+func (f *fakeHealthSource) RefreshRoutes(context.Context) error { return f.refreshErr }
 
 func (f *fakeHealthSource) Health(ctx context.Context) []proxy.TargetHealth {
 	if f.health == nil {
@@ -454,24 +457,20 @@ func TestHealthListenerLoopbackGuard(t *testing.T) {
 	}
 }
 
-// installPrometheus wires a fresh MeterProvider + Prometheus reader into the
-// global OTel meter — the same shape setupOTel produces when health.listen is
-// set — and returns the scrape handler.
-func installPrometheus(t *testing.T) http.Handler {
-	t.Helper()
+// testMetrics scrapes the Prometheus reader that TestMain installs, as setupOTel
+// does for health.listen. Package instruments bind to the first global meter
+// provider, so every test shares this reader.
+var testMetrics http.Handler
+
+func TestMain(m *testing.M) {
 	registry := prometheus.NewRegistry()
 	exporter, err := otelprom.New(otelprom.WithRegisterer(registry))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
-	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(exporter))
-	previous := otel.GetMeterProvider()
-	otel.SetMeterProvider(provider)
-	t.Cleanup(func() {
-		otel.SetMeterProvider(previous)
-		_ = provider.Shutdown(context.Background())
-	})
-	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(exporter)))
+	testMetrics = promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+	os.Exit(m.Run())
 }
 
 func scrape(t *testing.T, handler http.Handler) string {
@@ -530,13 +529,13 @@ func activateClient(t *testing.T, address, pin string) *pkcs11.Client {
 // proves a PIN refused by the broker's verifier never reaches the HSM: the
 // proxy-physical-login count does not move.
 func TestMetricsEndpointExposesProxyAndOperationMetrics(t *testing.T) {
-	metricsHandler := installPrometheus(t)
 	cfg, err := loadOptions(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	address, server := testModeServer(t, cfg)
-	handler := (&healthServer{source: server, metrics: metricsHandler}).Handler()
+	handler := (&healthServer{source: server, metrics: testMetrics}).Handler()
+	before := physicalLoginCount(t, scrape(t, handler))
 
 	client := activateClient(t, address, testmock.DefaultPIN)
 	if err := client.Activate(context.Background()); err != nil {
@@ -550,8 +549,8 @@ func TestMetricsEndpointExposesProxyAndOperationMetrics(t *testing.T) {
 		}
 	}
 	logins := physicalLoginCount(t, body)
-	if logins != 1 {
-		t.Fatalf("proxy-physical-login = %v after one activation, want 1\n%s", logins, body)
+	if logins != before+1 {
+		t.Fatalf("proxy-physical-login moved %v -> %v after one activation, want one more\n%s", before, logins, body)
 	}
 
 	// A wrong PIN is refused by the in-memory verifier before any HSM call.
@@ -622,7 +621,6 @@ func TestHealthEndpointIntegration(t *testing.T) {
 	if modulePath == "" {
 		t.Skip("PKCS11_MODULE is not set")
 	}
-	metricsHandler := installPrometheus(t)
 	cfg, err := loadOptions(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -654,7 +652,7 @@ func TestHealthEndpointIntegration(t *testing.T) {
 	}()
 	waitBound(t, server)
 
-	handler := (&healthServer{source: server, metrics: metricsHandler}).Handler()
+	handler := (&healthServer{source: server, metrics: testMetrics}).Handler()
 	code, body, _ := get(t, handler, "/readyz")
 	if code != http.StatusOK {
 		t.Fatalf("readyz = %d: %s", code, body)
@@ -671,5 +669,61 @@ func TestHealthEndpointIntegration(t *testing.T) {
 	}
 	if body := scrape(t, handler); !strings.Contains(body, "pkcs11_proxy_physical_sessions") {
 		t.Fatalf("scrape missing broker gauges:\n%s", body)
+	}
+}
+
+// TestReadyzFailsWhileDiscoveryFails keeps a broker whose token enumeration
+// fails out of rotation until enumeration succeeds again.
+func TestReadyzFailsWhileDiscoveryFails(t *testing.T) {
+	cfg := defaultOptions(t)
+	cfg.Insecure = true
+	h := newDiscoveryHarness(t, testmock.New("rz", 1), &discoverySpec{Module: "test:rz", RefreshInterval: -1}, cfg)
+	waitBound(t, h.server)
+	handler := (&healthServer{source: h.server}).Handler()
+
+	h.module.SetFault("GetSlotList", raw.Error(raw.CKR_DEVICE_ERROR))
+	code, body, _ := get(t, handler, "/readyz")
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz while enumeration fails = %d: %s", code, body)
+	}
+	var payload readyzResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.DiscoveryError != "CKR_DEVICE_ERROR" {
+		t.Fatalf("discovery_error = %q, want the return value alone", payload.DiscoveryError)
+	}
+
+	h.module.SetFault("GetSlotList", nil)
+	if code, body, _ := get(t, handler, "/readyz"); code != http.StatusOK {
+		t.Fatalf("readyz after enumeration recovers = %d: %s", code, body)
+	}
+}
+
+// TestReadyzAnswersWhileEnumerationHangs bounds /readyz by its probe timeout
+// while a token enumeration is stuck inside the module.
+func TestReadyzAnswersWhileEnumerationHangs(t *testing.T) {
+	cfg := defaultOptions(t)
+	cfg.Insecure = true
+	h := newDiscoveryHarness(t, testmock.New("hang", 1), &discoverySpec{Module: "test:hang", RefreshInterval: -1}, cfg)
+	waitBound(t, h.server)
+	gate := testmock.NewGate()
+	h.module.SetGate("GetSlotList", gate)
+	t.Cleanup(gate.Open)
+	handler := (&healthServer{source: h.server, probeTimeout: 100 * time.Millisecond}).Handler()
+
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		answered <- recorder
+	}()
+	select {
+	case recorder := <-answered:
+		if recorder.Code != http.StatusServiceUnavailable {
+			t.Fatalf("readyz while enumeration hangs = %d: %s", recorder.Code, recorder.Body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("readyz waited on a hung enumeration past its probe timeout")
 	}
 }

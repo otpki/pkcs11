@@ -70,6 +70,10 @@ The server gets a stable principal from either:
 `TargetConfig.Authorize` then decides what that principal may do. Authorization
 runs before the request consumes HSM queue or session capacity.
 
+Route listing asks `Authorize` about each target with
+`Operation = proxy.AuthorizationOperationListRoutes`. A refused target is left
+out of the caller's catalog.
+
 Client-activated targets have one extra authorization step. The caller selected
 to perform physical activation is checked with:
 
@@ -566,9 +570,10 @@ The root `pkcs11` package also emits managed-operation metrics through
 `/healthz` stays simple on purpose. A broken HSM does not make the process itself
 dead.
 
-`/readyz` returns 503 when the broker is draining. Route health is included in
-the response body so operators can see a bad token without necessarily taking
-all unrelated routes out of service.
+`/readyz` returns 503 while the broker cannot take traffic (examples: draining and
+failed token discovery). Route health is included in the response body so
+operators can see a bad token without necessarily taking all unrelated routes
+out of service.
 
 The listener is unauthenticated and serves operational metadata. It must bind to
 loopback unless `health.allow_remote` is enabled.

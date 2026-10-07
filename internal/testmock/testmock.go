@@ -163,14 +163,15 @@ type Module struct {
 var _ raw.Module = (*Module)(nil)
 
 type token struct {
-	slot     raw.SlotID
-	label    string
-	serial   string
-	pin      []byte
-	loggedIn bool
-	absent   bool // hot-unplugged: unlisted, unopenable, live sessions survive
-	objects  map[raw.ObjectHandle]*object
-	nextObj  raw.ObjectHandle
+	slot          raw.SlotID
+	label         string
+	serial        string
+	pin           []byte
+	loggedIn      bool
+	absent        bool // hot-unplugged: unlisted, unopenable, live sessions survive
+	uninitialized bool
+	objects       map[raw.ObjectHandle]*object
+	nextObj       raw.ObjectHandle
 }
 
 type object struct {
@@ -246,19 +247,23 @@ func (m *Module) require() error {
 // Slot numbers are never reused: a re-added token lands on a fresh slot even
 // when an earlier token was removed.
 func (m *Module) AddToken(label, serial string) raw.SlotID {
+	return m.addToken(&token{label: label, serial: serial, pin: []byte(DefaultPIN)})
+}
+
+// AddUninitializedToken inserts a slot whose token awaits C_InitToken.
+func (m *Module) AddUninitializedToken(serial string) raw.SlotID {
+	return m.addToken(&token{serial: serial, uninitialized: true})
+}
+
+// addToken places t on the next fresh slot with an empty object store.
+func (m *Module) addToken(t *token) raw.SlotID {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	slot := raw.SlotID(len(m.tokens) + 1)
-	t := &token{
-		slot:    slot,
-		label:   label,
-		serial:  serial,
-		pin:     []byte(DefaultPIN),
-		objects: make(map[raw.ObjectHandle]*object),
-		nextObj: 1,
-	}
+	t.slot = raw.SlotID(len(m.tokens) + 1)
+	t.objects = make(map[raw.ObjectHandle]*object)
+	t.nextObj = 1
 	m.tokens = append(m.tokens, t)
-	return slot
+	return t.slot
 }
 
 // RemoveToken ejects the token at slot: it disappears from token-present slot
@@ -333,9 +338,12 @@ func (m *Module) operationGate(operation string) {
 	}
 }
 
-// SetFault installs a fault that fails the named operation (e.g. "GetSlotList")
-// with err, for exercising whole-module failure paths; a nil error clears it.
+// SetFault makes the named operation fail with err; a nil error clears it.
+// It panics for an operation outside faultableOperations.
 func (m *Module) SetFault(operation string, err error) {
+	if !faultableOperations[operation] {
+		panic("testmock: SetFault cannot fault " + operation)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.opFaults == nil {
@@ -347,6 +355,16 @@ func (m *Module) SetFault(operation string, err error) {
 	}
 	m.opFaults[operation] = err
 }
+
+const (
+	opGetSlotList    = "GetSlotList"
+	opOpenSession    = "OpenSession"
+	opLogin          = "Login"
+	opLogout         = "Logout"
+	opGenerateRandom = "GenerateRandom"
+)
+
+var faultableOperations = map[string]bool{opGetSlotList: true, opOpenSession: true, opLogin: true, opLogout: true}
 
 // operationFault reports the fault installed for operation, or nil.
 func (m *Module) operationFault(operation string) error {
@@ -556,8 +574,8 @@ func (m *Module) GetInterfaceList() ([]raw.InterfaceInfo, error) {
 // has not been removed are listed; the physical slot numbers stay stable, so
 // removing slot 1 of 3 leaves {2, 3}. Each call is counted by SlotListCalls.
 func (m *Module) GetSlotList(tokenPresent bool) ([]raw.SlotID, error) {
-	m.operationGate("GetSlotList")
-	if err := m.operationFault("GetSlotList"); err != nil {
+	m.operationGate(opGetSlotList)
+	if err := m.operationFault(opGetSlotList); err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
@@ -615,13 +633,16 @@ func (m *Module) GetTokenInfo(slot raw.SlotID) (raw.TokenInfo, error) {
 		return raw.TokenInfo{}, raw.Error(raw.CKR_TOKEN_NOT_PRESENT)
 	}
 	count := t.sessionCount(m.sessions, false)
+	flags := raw.CKF_RNG | raw.CKF_LOGIN_REQUIRED | raw.CKF_SIGN | raw.CKF_DECRYPT
+	if !t.uninitialized {
+		flags |= raw.CKF_USER_PIN_INITIALIZED | raw.CKF_TOKEN_INITIALIZED
+	}
 	return raw.TokenInfo{
-		Label:          t.label,
-		ManufacturerID: "OTPKI Test",
-		Model:          "TEST-1",
-		SerialNumber:   t.serial,
-		Flags: raw.CKF_RNG | raw.CKF_LOGIN_REQUIRED | raw.CKF_USER_PIN_INITIALIZED |
-			raw.CKF_TOKEN_INITIALIZED | raw.CKF_SIGN | raw.CKF_DECRYPT,
+		Label:              t.label,
+		ManufacturerID:     "OTPKI Test",
+		Model:              "TEST-1",
+		SerialNumber:       t.serial,
+		Flags:              flags,
 		MaxSessionCount:    64,
 		SessionCount:       count,
 		MaxRwSessionCount:  64,
@@ -682,6 +703,9 @@ func (m *Module) GetMechanismInfo(slot raw.SlotID, mechanism raw.MechanismType) 
 // OpenSession creates a session on the slot; CKF_SERIAL_SESSION is required
 // like any standard module. A removed token refuses new sessions.
 func (m *Module) OpenSession(slot raw.SlotID, flags uint) (raw.SessionHandle, error) {
+	if err := m.operationFault(opOpenSession); err != nil {
+		return 0, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	t, err := m.lookup(slot)
@@ -763,6 +787,9 @@ func (m *Module) GetSessionInfo(handle raw.SessionHandle) (raw.SessionInfo, erro
 
 // Login performs a token-scope user login; DefaultPIN is the accepted PIN.
 func (m *Module) Login(handle raw.SessionHandle, userType uint, pin []byte) error {
+	if err := m.operationFault(opLogin); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, t, err := m.lookupSession(handle)
@@ -792,6 +819,9 @@ func (m *Module) LoginUser(handle raw.SessionHandle, userType uint, pin []byte, 
 
 // Logout clears the token's login state.
 func (m *Module) Logout(handle raw.SessionHandle) error {
+	if err := m.operationFault(opLogout); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, t, err := m.lookupSession(handle)
@@ -1547,7 +1577,7 @@ func (m *Module) SeedRandom(handle raw.SessionHandle, _ []byte) error {
 
 // GenerateRandom returns real cryptographic randomness.
 func (m *Module) GenerateRandom(handle raw.SessionHandle, length int) ([]byte, error) {
-	m.operationGate("GenerateRandom")
+	m.operationGate(opGenerateRandom)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, _, err := m.lookupSession(handle); err != nil {

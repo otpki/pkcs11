@@ -252,3 +252,63 @@ func TestManagedBoundariesLeaveUnmappedVendorErrorsUntouched(t *testing.T) {
 		t.Fatal("terminal vendor error must not mark the session broken")
 	}
 }
+
+func TestOpenSessionTranslatesBeforeClassification(t *testing.T) {
+	ctx := context.Background()
+	client, module := openTranslatingClient(t)
+	client.roPool.Invalidate(ctx)
+	module.SetFault("OpenSession", raw.Error(testVendorErrUnreachable))
+
+	_, err := client.roPool.Acquire(ctx)
+	if !raw.IsError(err, raw.CKR_DEVICE_ERROR) {
+		t.Fatalf("Acquire error = %v, want translated CKR_DEVICE_ERROR", err)
+	}
+	if got := classifyDeviceError(client.currentDevice(), err, false); got != RecoveryReinitialize {
+		t.Fatalf("classification = %v, want RecoveryReinitialize", got)
+	}
+}
+
+func TestLoginTranslatesBeforeClassification(t *testing.T) {
+	ctx := context.Background()
+	client, module := openTranslatingClient(t)
+	client.roPool.Invalidate(ctx)
+	module.SetFault("Login", raw.Error(testVendorErrUnreachable))
+
+	_, err := client.roPool.Acquire(ctx)
+	if !raw.IsError(err, raw.CKR_DEVICE_ERROR) {
+		t.Fatalf("Acquire error = %v, want translated CKR_DEVICE_ERROR", err)
+	}
+	if got := classifyDeviceError(client.currentDevice(), err, false); got != RecoveryReinitialize {
+		t.Fatalf("classification = %v, want RecoveryReinitialize", got)
+	}
+}
+
+func TestDeactivateTranslatesLogoutError(t *testing.T) {
+	client, module := openTranslatingClient(t)
+	module.SetFault("Logout", raw.Error(testVendorErrNotLoggedIn))
+
+	if err := client.Deactivate(context.Background()); err != nil {
+		t.Fatalf("Deactivate = %v, want nil for a token already logged out", err)
+	}
+}
+
+// openTranslatingClient opens a client whose vendor translates the test vendor
+// error values, over a test module the caller can fault.
+func openTranslatingClient(t *testing.T) (*Client, *testmock.Module) {
+	t.Helper()
+	ctx := context.Background()
+	vendor := newTranslatingVendor(&translateRecorder{})
+	source := testmockSource(t)
+	client, err := Open(ctx, Config{
+		Module:        source,
+		Vendors:       []VendorModule{vendor},
+		Compatibility: CompatibilityConfig{AdapterFamily: vendor.Definition().ID},
+		PIN:           StaticPIN(testmock.DefaultPIN),
+		Login:         LoginConfig{Mode: LoginLazy},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(ctx) })
+	return client, source.Module
+}
