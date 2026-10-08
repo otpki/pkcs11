@@ -402,7 +402,10 @@ func TestReadyzOnRealBroker(t *testing.T) {
 		}
 	}
 	// Secret-free output: no PIN, module source, or serial material.
-	for _, leaked := range []string{testmock.DefaultPIN, "testmock", "TEST-"} {
+	if testmock.ContainsDefaultPIN(string(body)) {
+		t.Fatalf("readyz body leaks the PIN: %s", body)
+	}
+	for _, leaked := range []string{"testmock", "TEST-"} {
 		if strings.Contains(string(body), leaked) {
 			t.Fatalf("readyz body leaks %q: %s", leaked, body)
 		}

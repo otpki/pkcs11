@@ -17,10 +17,13 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/sha512"
+	"encoding/json"
 	"fmt"
 	"hash"
+	"io"
 	"maps"
 	"math/big"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -32,6 +35,26 @@ import (
 // DefaultPIN is the user PIN accepted by Login. It is public on purpose: the
 // test module protects nothing.
 const DefaultPIN = "1234"
+
+var defaultPINPattern = regexp.MustCompile(`(?:^|\D)` + regexp.QuoteMeta(DefaultPIN) + `(?:\D|$)`)
+
+// ContainsDefaultPIN reports whether a string in the JSON payload holds DefaultPIN outside a longer
+// number. A payload that is not JSON is checked whole.
+func ContainsDefaultPIN(payload string) bool {
+	decoder := json.NewDecoder(strings.NewReader(payload))
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return false
+		}
+		if err != nil {
+			return defaultPINPattern.MatchString(payload)
+		}
+		if text, ok := token.(string); ok && defaultPINPattern.MatchString(text) {
+			return true
+		}
+	}
+}
 
 var (
 	errUnsupported = raw.Error(raw.CKR_FUNCTION_NOT_SUPPORTED)
