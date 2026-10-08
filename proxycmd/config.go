@@ -251,9 +251,9 @@ type options struct {
 	// one token, so multiple entries over the same or different modules
 	// publish multiple tokens. Mutually exclusive with Discovery.
 	Targets []targetSpec `mapstructure:"targets"`
-	// Discovery publishes one route per token found in each listed module.
-	// A route-list request refreshes the catalog when the refresh interval
-	// has passed. There is no background discovery loop.
+	// Discovery publishes one route per initialized token found in each listed
+	// module. Route listings and /readyz probes refresh the catalog when the
+	// refresh interval has passed. Discovery runs only when called.
 	Discovery []discoverySpec `mapstructure:"discovery"`
 	// Sessions bounds the physical-resource pool; see proxy.SessionBudget for
 	// the authoritative semantics of each field. In discovery mode these are

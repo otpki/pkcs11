@@ -176,9 +176,7 @@ func (s *sessionLease) DoRaw(ctx context.Context, fn func(raw.Module, raw.Sessio
 	err := s.pool.execute(ctx, s.worker, func(module raw.Module) error {
 		return fn(module, s.handle)
 	})
-	device := s.currentDevice()
-	err = translateDeviceError(device, err)
-	switch classifyDeviceError(device, err, false) {
+	switch classifyDeviceError(s.currentDevice(), err, false) {
 	case RecoveryReplaceSession, RecoveryReinitialize, RecoveryRediscover:
 		s.MarkBroken()
 	}
@@ -528,15 +526,13 @@ func (p *sessionPool) Acquire(ctx context.Context) (*sessionLease, error) {
 	return lease, nil
 }
 
-// execute applies module-wide serialization and, when present, dispatches the
-// native call through the session's pinned OS-thread worker.
+// execute runs one native call under module-wide serialization, on the
+// session's pinned OS-thread worker when present. Vendor error values are
+// translated before any caller examines them.
 func (p *sessionPool) execute(ctx context.Context, worker *sessionWorker, fn func(raw.Module) error) error {
 	device := p.currentDevice()
 	call := func() error { return p.module.execute(ctx, device.plan, fn) }
-	if worker != nil {
-		return worker.do(ctx, call)
-	}
-	return call()
+	return translateDeviceError(device, worker.do(ctx, call))
 }
 
 // openHandle creates one native session, attaches a pinned worker when required,

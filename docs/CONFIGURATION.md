@@ -84,10 +84,10 @@ discovery:
           max_physical_total: 4
 ```
 
-Do not set `targets` and `discovery` together. Discovery normally builds names
-from token serials, falling back to labels. `name_prefix` keeps tokens from
-different modules from getting the same name. An override's `name` is used as
-written, without the prefix.
+Do not set `targets` and `discovery` together. Discovery publishes one route per
+initialized token. It normally builds names from token serials, falling back to
+labels. `name_prefix` keeps tokens from different modules from getting the same
+name. An override's `name` is used as written, without the prefix.
 
 Each override must select exactly one token at startup using exactly one of
 `token_serial`, `token_label`, or `slot_id`. Its `sessions` and `activation`
@@ -95,12 +95,18 @@ sections override only the listed settings for that token. Other settings
 inherit the global values. Static target entries do not accept these per-token
 sections.
 
-`discovery[].refresh_interval` defaults to `5s`. A route-list request checks for
-changes only when that interval has passed. This is not a background poll.
-Lower it when token changes need to appear sooner and callers list routes often.
-Raise it when enumeration is expensive. Zero means `5s`. A negative value checks
-on every listing. No setting makes an old logical client move to a new token
-silently. A changed route can require that client to reopen.
+`discovery[].refresh_interval` defaults to `5s`. Listing routes and each
+`/readyz` probe check for token changes, at most once per interval. The interval
+is the maximum age of the last check, and discovery runs only when called. With
+a readiness probe, discovery in effect polls at the slower of the probe period
+and the interval. Concurrent callers share one check. A token awaiting
+initialization gets its route at the first check after it is initialized.
+
+Lower the interval when token changes need to appear sooner and listings or
+probes come often. Raise it when enumeration is expensive. Zero means `5s`. A
+negative value checks on every listing and every probe. No setting makes an old
+logical client move to a new token silently. A changed route can require that
+client to reopen.
 
 ## Network and shutdown
 

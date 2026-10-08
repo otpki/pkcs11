@@ -35,10 +35,16 @@ targets:
     # Multiple selectors must all match. No selector picks the first token.
     vendors: []                    # Empty enables all compiled vendor adapters.
 
-# Use discovery instead of targets to publish every token from a module.
-# Listing routes checks for changes, at most once per refresh_interval.
-# It is not a background polling interval. Zero uses 5s. Negative refreshes
-# on every listing, which can be expensive on a network HSM.
+# Use discovery instead of targets to publish every initialized token from a
+# module. A token awaiting initialization gets its route at the first check
+# after it is initialized.
+#
+# Listing routes and each /readyz probe check for changes, at most once per
+# refresh_interval. The interval is the maximum age of the last check, and
+# discovery runs only when called. With a readiness probe, discovery in effect
+# polls at the slower of the probe period and refresh_interval. Concurrent
+# callers share one check. Zero uses 5s. Negative checks on every listing and
+# every probe, which can be expensive on a network HSM.
 # discovery:
 #   - module: "/opt/vendor/lib/libpkcs11.so"
 #     name_prefix: "site-a-"        # Avoid duplicate names across modules.
