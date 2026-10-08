@@ -70,6 +70,10 @@ The server gets a stable principal from either:
 `TargetConfig.Authorize` then decides what that principal may do. Authorization
 runs before the request consumes HSM queue or session capacity.
 
+Route listing asks `Authorize` about each target with
+`Operation = proxy.AuthorizationOperationListRoutes`. A refused target is left
+out of the caller's catalog.
+
 Client-activated targets have one extra authorization step. The caller selected
 to perform physical activation is checked with:
 

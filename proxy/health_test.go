@@ -326,7 +326,10 @@ func TestTargetHealthJSONIsSecretFree(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(payload)
-	for _, secret := range []string{testmock.DefaultPIN, "testmock://", "testmode-info", "TEST-"} {
+	if testmock.ContainsDefaultPIN(text) {
+		t.Fatalf("health JSON leaks the PIN: %s", text)
+	}
+	for _, secret := range []string{"testmock://", "testmode-info", "TEST-"} {
 		if strings.Contains(text, secret) {
 			t.Fatalf("health JSON leaks %q: %s", secret, text)
 		}
