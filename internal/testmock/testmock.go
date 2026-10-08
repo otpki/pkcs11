@@ -21,6 +21,7 @@ import (
 	"hash"
 	"maps"
 	"math/big"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -32,6 +33,11 @@ import (
 // DefaultPIN is the user PIN accepted by Login. It is public on purpose: the
 // test module protects nothing.
 const DefaultPIN = "1234"
+
+var defaultPINPattern = regexp.MustCompile(`(?:^|\D)` + regexp.QuoteMeta(DefaultPIN) + `(?:\D|$)`)
+
+// ContainsDefaultPIN reports whether text holds DefaultPIN outside a longer number.
+func ContainsDefaultPIN(text string) bool { return defaultPINPattern.MatchString(text) }
 
 var (
 	errUnsupported = raw.Error(raw.CKR_FUNCTION_NOT_SUPPORTED)

@@ -226,3 +226,16 @@ func TestSourceIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestContainsDefaultPINIgnoresLongerNumbers(t *testing.T) {
+	for _, text := range []string{`"checked_at":"2026-10-08T20:38:54.051234034Z"`, `"duration":512345`, ""} {
+		if ContainsDefaultPIN(text) {
+			t.Errorf("ContainsDefaultPIN(%q) = true, want false", text)
+		}
+	}
+	for _, text := range []string{`"pin":"1234"`, "login with 1234 failed", "PIN1234", "1234"} {
+		if !ContainsDefaultPIN(text) {
+			t.Errorf("ContainsDefaultPIN(%q) = false, want true", text)
+		}
+	}
+}
