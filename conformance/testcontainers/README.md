@@ -18,6 +18,11 @@ go run . -root ../.. -provider all
 `all` only includes fixtures marked `IncludeInAll`. Private and licensed
 fixtures are excluded.
 
+From the repository root, `just conformance <provider>` wraps the launcher
+(pass an image as the second argument to skip the fixture build), and
+`just integration <vendor>` builds and runs the `PKCS11_MODULE`-gated
+integration tests in the vendor's Docker image.
+
 ## Flags
 
 ```text
@@ -26,6 +31,7 @@ fixtures are excluded.
 -root PATH             repository root (auto-detected when omitted)
 -output PATH           report directory
 -timeout DURATION      override the provider timeout
+-image IMAGE           run a prebuilt image instead of building (single provider only)
 -build-logs BOOL       show Docker build output (default true)
 -live-logs BOOL        stream startup and go test output (default true)
 -asset NAME=PATH       provider asset (repeatable)
