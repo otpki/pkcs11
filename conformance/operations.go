@@ -214,35 +214,14 @@ func (r *Runner) testGenerate(ctx context.Context, testCase Case) (map[string]an
 }
 
 func (r *Runner) testSign(ctx context.Context, testCase Case) (map[string]any, error) {
-	options := r.keyPairOptions(testCase)
-	pair, err := r.client.GenerateKeyPair(ctx, options)
-	if err != nil {
-		return nil, fmt.Errorf("generate %s key pair: %w", testCase.Algorithm, err)
-	}
-	cleanup := func(primary error) error {
-		return errorsJoin(primary, r.cleanup(ctx, pair.Private, pair.Public))
-	}
-
 	hash, err := hashByName(testCase.Hash, defaultHash(testCase.Algorithm))
 	if err != nil {
-		return nil, cleanup(err)
+		return nil, err
 	}
 	padding := pkcs11.RSAPaddingPKCS1v15
 	if strings.EqualFold(testCase.Variant, "pss") || testCase.Variant == "" && testCase.Algorithm == pkcs11.AlgorithmRSA {
 		padding = pkcs11.RSAPaddingPSS
 	}
-	signer, err := r.client.Signer(ctx, pkcs11.SignerConfig{
-		Private:        pair.Private,
-		Public:         pair.Public,
-		Algorithm:      testCase.Algorithm,
-		DefaultHash:    hash,
-		DefaultPadding: padding,
-		Context:        []byte(testCase.Context),
-	})
-	if err != nil {
-		return nil, cleanup(fmt.Errorf("create %s signer: %w", testCase.Algorithm, err))
-	}
-
 	message := testMessage(testCase.MessageBytes)
 	input := message
 	var opts crypto.SignerOpts
@@ -252,7 +231,7 @@ func (r *Runner) testSign(ctx context.Context, testCase Case) (map[string]any, e
 	case pkcs11.AlgorithmRSA:
 		input, err = hashInput(hash, message)
 		if err != nil {
-			return nil, cleanup(err)
+			return nil, err
 		}
 		intent.Prehashed = true
 		if padding == pkcs11.RSAPaddingPSS {
@@ -266,7 +245,7 @@ func (r *Runner) testSign(ctx context.Context, testCase Case) (map[string]any, e
 	case pkcs11.AlgorithmECDSAP256, pkcs11.AlgorithmECDSAP384, pkcs11.AlgorithmECDSAP521:
 		input, err = hashInput(hash, message)
 		if err != nil {
-			return nil, cleanup(err)
+			return nil, err
 		}
 		opts = hash
 		intent.Prehashed = true
@@ -282,7 +261,7 @@ func (r *Runner) testSign(ctx context.Context, testCase Case) (map[string]any, e
 			}
 			input, err = hashInput(hash, message)
 			if err != nil {
-				return nil, cleanup(err)
+				return nil, err
 			}
 			pqcOpts.Hash, pqcOpts.Prehashed = hash, true
 			intent.Hash, intent.Prehashed = hash, true
@@ -295,6 +274,37 @@ func (r *Runner) testSign(ctx context.Context, testCase Case) (map[string]any, e
 			intent.Hash = 0
 		}
 		opts = pqcOpts
+	}
+
+	// Resolve and probe before creating any test objects so a missing
+	// capability reports as a skip instead of a failed operation
+	signRoute, err := r.client.Resolve(withOperation(intent, pkcs11.OperationSign))
+	if err != nil {
+		return nil, err
+	}
+	if err := r.probeParameterizedMechanism(signRoute); err != nil {
+		return nil, err
+	}
+
+	options := r.keyPairOptions(testCase)
+	pair, err := r.client.GenerateKeyPair(ctx, options)
+	if err != nil {
+		return nil, fmt.Errorf("generate %s key pair: %w", testCase.Algorithm, err)
+	}
+	cleanup := func(primary error) error {
+		return errorsJoin(primary, r.cleanup(ctx, pair.Private, pair.Public))
+	}
+
+	signer, err := r.client.Signer(ctx, pkcs11.SignerConfig{
+		Private:        pair.Private,
+		Public:         pair.Public,
+		Algorithm:      testCase.Algorithm,
+		DefaultHash:    hash,
+		DefaultPadding: padding,
+		Context:        []byte(testCase.Context),
+	})
+	if err != nil {
+		return nil, cleanup(fmt.Errorf("create %s signer: %w", testCase.Algorithm, err))
 	}
 
 	signature, err := signer.SignContext(ctx, input, opts)
@@ -407,17 +417,24 @@ func (r *Runner) testSymmetricEncrypt(ctx context.Context, testCase Case) (map[s
 }
 
 func (r *Runner) testRSAEncrypt(ctx context.Context, testCase Case) (map[string]any, error) {
-	pair, err := r.client.GenerateKeyPair(ctx, r.keyPairOptions(testCase))
-	if err != nil {
-		return nil, err
-	}
 	padding := pkcs11.RSAPaddingOAEP
 	if strings.EqualFold(testCase.Variant, "pkcs1v15") {
 		padding = pkcs11.RSAPaddingPKCS1v15
 	}
 	hash, err := hashByName(testCase.Hash, crypto.SHA256)
 	if err != nil {
-		return nil, errorsJoin(err, r.cleanup(ctx, pair.Private, pair.Public))
+		return nil, err
+	}
+	route, err := r.client.Resolve(pkcs11.Intent{Operation: pkcs11.OperationEncrypt, Algorithm: pkcs11.AlgorithmRSA, RSAPadding: padding, Hash: hash})
+	if err != nil {
+		return nil, err
+	}
+	if err := r.probeParameterizedMechanism(route); err != nil {
+		return nil, err
+	}
+	pair, err := r.client.GenerateKeyPair(ctx, r.keyPairOptions(testCase))
+	if err != nil {
+		return nil, err
 	}
 	plaintext := []byte("otpki-rsa-encryption-conformance")
 	encrypted, err := r.client.Encrypt(ctx, pair.Public, plaintext, pkcs11.CipherOptions{
@@ -823,6 +840,69 @@ func (r *Runner) requireMechanismFlags(route pkcs11.Route, required uint) error 
 		route.Mechanism.Mechanism, required, raw.Error(raw.CKR_FUNCTION_NOT_SUPPORTED))
 }
 
+// probeParameterizedMechanism reports a capability gap when a resolved
+// mechanism parameter names a digest the token does not advertise. Tokens do
+// not say which parameter values they accept so without this check the gap
+// shows up later as an operational error like CKR_ARGUMENTS_BAD
+func (r *Runner) probeParameterizedMechanism(routes ...pkcs11.Route) error {
+	for _, route := range routes {
+		if route.Mechanism == nil {
+			continue
+		}
+		for _, mechanism := range parameterDigestMechanisms(route.Mechanism.Parameter) {
+			if !r.client.Capabilities().HasMechanism(mechanism) {
+				return fmt.Errorf("conformance: mechanism 0x%x parameter mechanism 0x%x is not advertised",
+					route.Mechanism.Mechanism, mechanism)
+			}
+		}
+	}
+	return nil
+}
+
+// parameterDigestMechanisms lists the digest mechanisms named inside a
+// mechanism parameter. A CKG_MGF1_* mask function needs the matching CKM_*
+// digest on the token even though the CKG value is not a mechanism itself
+func parameterDigestMechanisms(parameter any) []uint {
+	switch value := parameter.(type) {
+	case raw.PSSParams:
+		return digestMechanismIDs(value.HashAlg, value.MGF)
+	case *raw.PSSParams:
+		if value != nil {
+			return digestMechanismIDs(value.HashAlg, value.MGF)
+		}
+	case raw.OAEPParams:
+		return digestMechanismIDs(value.HashAlg, value.MGF)
+	case *raw.OAEPParams:
+		if value != nil {
+			return digestMechanismIDs(value.HashAlg, value.MGF)
+		}
+	}
+	return nil
+}
+
+func digestMechanismIDs(hashAlg, mgf uint) []uint {
+	var mechanisms []uint
+	if hashAlg != 0 {
+		mechanisms = append(mechanisms, hashAlg)
+	}
+	if digest, ok := mgfDigestMechanisms[mgf]; ok {
+		mechanisms = append(mechanisms, digest)
+	}
+	return mechanisms
+}
+
+var mgfDigestMechanisms = map[uint]uint{
+	raw.CKG_MGF1_SHA1:     raw.CKM_SHA_1,
+	raw.CKG_MGF1_SHA224:   raw.CKM_SHA224,
+	raw.CKG_MGF1_SHA256:   raw.CKM_SHA256,
+	raw.CKG_MGF1_SHA384:   raw.CKM_SHA384,
+	raw.CKG_MGF1_SHA512:   raw.CKM_SHA512,
+	raw.CKG_MGF1_SHA3_224: raw.CKM_SHA3_224,
+	raw.CKG_MGF1_SHA3_256: raw.CKM_SHA3_256,
+	raw.CKG_MGF1_SHA3_384: raw.CKM_SHA3_384,
+	raw.CKG_MGF1_SHA3_512: raw.CKM_SHA3_512,
+}
+
 func (r *Runner) testMessageSign(ctx context.Context, testCase Case) (map[string]any, error) {
 	if err := r.requireInterface(raw.Version{Major: 3, Minor: 0}); err != nil {
 		return nil, err
@@ -836,15 +916,39 @@ func (r *Runner) testMessageSign(ctx context.Context, testCase Case) (map[string
 	if testCase.RSABits == 0 {
 		testCase.RSABits = 2048
 	}
+	hash, err := hashByName(testCase.Hash, crypto.SHA256)
+	if err != nil {
+		return nil, err
+	}
+	intent := pkcs11.Intent{
+		Algorithm:     pkcs11.AlgorithmRSA,
+		Hash:          hash,
+		Prehashed:     true,
+		RSAPadding:    pkcs11.RSAPaddingPSS,
+		PSSSaltLength: hash.Size(),
+	}
+	signRoute, err := r.client.Resolve(withOperation(intent, pkcs11.OperationSign))
+	if err != nil {
+		return nil, err
+	}
+	verifyRoute, err := r.client.Resolve(withOperation(intent, pkcs11.OperationVerify))
+	if err != nil {
+		return nil, err
+	}
+	if err := r.probeParameterizedMechanism(signRoute, verifyRoute); err != nil {
+		return nil, err
+	}
+	if err := r.requireMechanismFlags(signRoute, raw.CKF_MESSAGE_SIGN); err != nil {
+		return nil, err
+	}
+	if err := r.requireMechanismFlags(verifyRoute, raw.CKF_MESSAGE_VERIFY); err != nil {
+		return nil, err
+	}
 	pair, err := r.client.GenerateKeyPair(ctx, r.keyPairOptions(testCase))
 	if err != nil {
 		return nil, err
 	}
 	cleanup := func(primary error) error { return errorsJoin(primary, r.cleanup(ctx, pair.Private, pair.Public)) }
-	hash, err := hashByName(testCase.Hash, crypto.SHA256)
-	if err != nil {
-		return nil, cleanup(err)
-	}
 	softwareSigner, err := r.client.Signer(ctx, pkcs11.SignerConfig{
 		Private:        pair.Private,
 		Public:         pair.Public,
@@ -858,27 +962,6 @@ func (r *Runner) testMessageSign(ctx context.Context, testCase Case) (map[string
 	message := testMessage(testCase.MessageBytes)
 	input, err := hashInput(hash, message)
 	if err != nil {
-		return nil, cleanup(err)
-	}
-	intent := pkcs11.Intent{
-		Algorithm:     pkcs11.AlgorithmRSA,
-		Hash:          hash,
-		Prehashed:     true,
-		RSAPadding:    pkcs11.RSAPaddingPSS,
-		PSSSaltLength: hash.Size(),
-	}
-	signRoute, err := r.client.Resolve(withOperation(intent, pkcs11.OperationSign))
-	if err != nil {
-		return nil, cleanup(err)
-	}
-	verifyRoute, err := r.client.Resolve(withOperation(intent, pkcs11.OperationVerify))
-	if err != nil {
-		return nil, cleanup(err)
-	}
-	if err := r.requireMechanismFlags(signRoute, raw.CKF_MESSAGE_SIGN); err != nil {
-		return nil, cleanup(err)
-	}
-	if err := r.requireMechanismFlags(verifyRoute, raw.CKF_MESSAGE_VERIFY); err != nil {
 		return nil, cleanup(err)
 	}
 	var signature []byte
@@ -929,15 +1012,33 @@ func (r *Runner) testSignatureFirstVerify(ctx context.Context, testCase Case) (m
 	if testCase.RSABits == 0 {
 		testCase.RSABits = 2048
 	}
+	hash, err := hashByName(testCase.Hash, crypto.SHA256)
+	if err != nil {
+		return nil, err
+	}
+	intent := pkcs11.Intent{
+		Algorithm:     pkcs11.AlgorithmRSA,
+		Hash:          hash,
+		Prehashed:     true,
+		RSAPadding:    pkcs11.RSAPaddingPSS,
+		PSSSaltLength: hash.Size(),
+	}
+	signRoute, err := r.client.Resolve(withOperation(intent, pkcs11.OperationSign))
+	if err != nil {
+		return nil, err
+	}
+	verifyRoute, err := r.client.Resolve(withOperation(intent, pkcs11.OperationVerify))
+	if err != nil {
+		return nil, err
+	}
+	if err := r.probeParameterizedMechanism(signRoute, verifyRoute); err != nil {
+		return nil, err
+	}
 	pair, err := r.client.GenerateKeyPair(ctx, r.keyPairOptions(testCase))
 	if err != nil {
 		return nil, err
 	}
 	cleanup := func(primary error) error { return errorsJoin(primary, r.cleanup(ctx, pair.Private, pair.Public)) }
-	hash, err := hashByName(testCase.Hash, crypto.SHA256)
-	if err != nil {
-		return nil, cleanup(err)
-	}
 	softwareSigner, err := r.client.Signer(ctx, pkcs11.SignerConfig{
 		Private:        pair.Private,
 		Public:         pair.Public,
@@ -949,21 +1050,6 @@ func (r *Runner) testSignatureFirstVerify(ctx context.Context, testCase Case) (m
 		return nil, cleanup(err)
 	}
 	input, err := hashInput(hash, testMessage(testCase.MessageBytes))
-	if err != nil {
-		return nil, cleanup(err)
-	}
-	intent := pkcs11.Intent{
-		Algorithm:     pkcs11.AlgorithmRSA,
-		Hash:          hash,
-		Prehashed:     true,
-		RSAPadding:    pkcs11.RSAPaddingPSS,
-		PSSSaltLength: hash.Size(),
-	}
-	signRoute, err := r.client.Resolve(withOperation(intent, pkcs11.OperationSign))
-	if err != nil {
-		return nil, cleanup(err)
-	}
-	verifyRoute, err := r.client.Resolve(withOperation(intent, pkcs11.OperationVerify))
 	if err != nil {
 		return nil, cleanup(err)
 	}

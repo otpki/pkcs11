@@ -99,3 +99,95 @@ jobs:
         with:
           tools: 'false'
       - run: just cross-build ${{ matrix.goos }} ${{ matrix.goarch }}
+
+  conformance:
+    name: ${{ matrix.provider }} conformance
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: softhsm2
+            dockerfile: vendors/softhsm/conformance/docker/Dockerfile
+            image: otpki/conformance-softhsm2-cgo
+            scope: softhsm2-cgo
+          - provider: kryoptic-pqc
+            dockerfile: vendors/kryoptic/conformance/docker/Dockerfile
+            image: otpki/conformance-kryoptic-cgo
+            scope: kryoptic-cgo
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+        with:
+          tools: 'false'
+      - name: Build and vet the conformance launcher
+        working-directory: conformance/testcontainers
+        run: |
+          go build ./...
+          go vet ./...
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build the conformance image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: conformance
+          load: true
+          tags: ${{ matrix.image }}:ci
+          build-args: |
+            PKCS11_BACKEND=cgo
+          provenance: false
+          # The provider's source build dominates image time, mode=max caches
+          # every stage so an unchanged pinned revision reuses the compiled HSM.
+          cache-from: type=gha,scope=${{ matrix.scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.scope }}
+      - name: Run the ${{ matrix.provider }} conformance suite
+        run: just conformance ${{ matrix.provider }} ${{ matrix.image }}:ci
+      - name: Upload conformance reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-${{ matrix.provider }}-cgo
+          path: reports/conformance/
+          if-no-files-found: ignore
+
+  integration:
+    name: ${{ matrix.vendor }} integration tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - vendor: softhsm
+            scope: softhsm2-cgo
+          - vendor: kryoptic
+            scope: kryoptic-cgo
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+        with:
+          tools: 'false'
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build the integration image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: vendors/${{ matrix.vendor }}/conformance/docker/Dockerfile
+          target: integration
+          load: true
+          tags: otpki/integration-${{ matrix.vendor }}-cgo:ci
+          provenance: false
+          # Shares the conformance scope. the vendored module build is reused
+          # from the conformance job's cache on warm runs.
+          cache-from: type=gha,scope=${{ matrix.scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.scope }}
+      - name: Run module-gated integration tests
+        run: just integration ${{ matrix.vendor }} ci

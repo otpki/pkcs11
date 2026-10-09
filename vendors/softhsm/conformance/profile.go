@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"os"
+	"slices"
 	"time"
 
 	pkcs11 "github.com/otpki/pkcs11"
@@ -43,10 +44,20 @@ func Profile() base.Profile {
 		"runtime", "sessions", "x509-certificate-object",
 		"import-aes-128", "import-aes-192",
 		"rsa-pss-sha384", "rsa-pkcs1-sha384", "rsa-pss-sha512", "rsa-pkcs1-sha512", "rsa-pkcs1-encrypt",
+		"rsa-pss-sha3-224", "rsa-pkcs1-sha3-224", "rsa-pss-sha3-256", "rsa-pkcs1-sha3-256",
+		"rsa-pss-sha3-384", "rsa-pkcs1-sha3-384", "rsa-pss-sha3-512", "rsa-pkcs1-sha3-512",
 		"ed25519", "ecdh-p384", "ecdh-p521",
 		"aes-128-cbc", "aes-128-ctr", "aes-192-gcm", "aes-192-ctr", "aes-256-gcm", "aes-256-cbc",
 		"ml-dsa-44-direct", "ml-dsa-65-direct", "ml-dsa-87-direct",
 		"ml-kem-512", "ml-kem-768", "ml-kem-1024",
+	)
+	annotate(cases,
+		"known gap: SoftHSM advertises no message-mode flags on CKM_RSA_PKCS_PSS, so C_SignMessage is unsupported",
+		"message-rsa-pss-sha256", "message-rsa-pss-sha3-256",
+	)
+	annotate(cases,
+		"known gap: SoftHSM does not implement C_VerifySignatureInit/C_VerifySignature",
+		"signature-first-rsa-pss-sha256", "signature-first-rsa-pss-sha3-256",
 	)
 	return base.Profile{
 		Module:   os.Getenv("PKCS11_MODULE"),
@@ -67,6 +78,16 @@ func promote(cases []base.Case, names ...string) {
 	for index := range cases {
 		if _, ok := selected[cases[index].Name]; ok {
 			cases[index].Requirement = base.Required
+		}
+	}
+}
+
+// annotate records provider gap notes on named cases without changing their
+// requirement, keeping the documented limitation beside the case it affects.
+func annotate(cases []base.Case, note string, names ...string) {
+	for index := range cases {
+		if cases[index].Notes == "" && slices.Contains(names, cases[index].Name) {
+			cases[index].Notes = note
 		}
 	}
 }

@@ -123,3 +123,19 @@ docker platform="linux/arm64":
         --build-arg GIT_BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || true)" \
         --build-arg GIT_HASH="$(git rev-parse --short HEAD 2>/dev/null || true)" \
         -t pkcs11-proxy:dev .
+
+# run a provider's conformance suite in its fixture container. Builds the
+# fixture image via testcontainers (the first SoftHSM source build is slow,
+# but Docker layer cache keeps reruns fast). Pass a prebuilt image to skip the
+# build entirely, as CI does:
+#   just conformance softhsm2 otpki/conformance-softhsm2-cgo:local
+conformance provider image="":
+    cd "{{ root }}/conformance/testcontainers" && go run . -root "{{ root }}" -provider {{ provider }} {{ if image != "" { "-image " + image } else { "" } }}
+
+# build a vendor's integration image (the Dockerfile's integration target) and
+# run the PKCS11_MODULE-gated tests inside it (ex. just integration softhsm)
+integration vendor tag="local":
+    docker buildx build --load --target integration \
+        -f "{{ root }}/vendors/{{ vendor }}/conformance/docker/Dockerfile" \
+        -t otpki/integration-{{ vendor }}-cgo:{{ tag }} "{{ root }}"
+    docker run --rm otpki/integration-{{ vendor }}-cgo:{{ tag }}
