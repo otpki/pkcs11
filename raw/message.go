@@ -11,10 +11,11 @@ func (c *Ctx) EncryptMessage(session SessionHandle, parameter any, associatedDat
 func (c *Ctx) EncryptMessageBegin(session SessionHandle, parameter any, associatedData []byte) error {
 	arena := &nativeArena{}
 	defer arena.close()
-	parameterPointer, parameterLength, _, err := marshalParameterInto(arena, parameter)
+	parameterPointer, parameterLength, metadata, err := marshalParameterInto(arena, parameter)
 	if err != nil {
 		return err
 	}
+	defer metadata.sync()
 	aadPointer, err := nativeCopy(arena, associatedData)
 	if err != nil {
 		return err
@@ -49,10 +50,11 @@ func (c *Ctx) DecryptMessage(session SessionHandle, parameter any, associatedDat
 func (c *Ctx) DecryptMessageBegin(session SessionHandle, parameter any, associatedData []byte) error {
 	arena := &nativeArena{}
 	defer arena.close()
-	parameterPointer, parameterLength, _, err := marshalParameterInto(arena, parameter)
+	parameterPointer, parameterLength, metadata, err := marshalParameterInto(arena, parameter)
 	if err != nil {
 		return err
 	}
+	defer metadata.sync()
 	aadPointer, err := nativeCopy(arena, associatedData)
 	if err != nil {
 		return err
@@ -83,10 +85,11 @@ func (c *Ctx) MessageSignInit(session SessionHandle, mechanisms []*Mechanism, ke
 func (c *Ctx) SignMessage(session SessionHandle, parameter any, data []byte) ([]byte, error) {
 	arena := &nativeArena{}
 	defer arena.close()
-	parameterPointer, parameterLength, _, err := marshalParameterInto(arena, parameter)
+	parameterPointer, parameterLength, metadata, err := marshalParameterInto(arena, parameter)
 	if err != nil {
 		return nil, err
 	}
+	defer metadata.sync()
 	inputPointer, err := nativeCopy(arena, data)
 	if err != nil {
 		return nil, err
@@ -110,10 +113,11 @@ func (c *Ctx) SignMessageBegin(session SessionHandle, parameter any) error {
 func (c *Ctx) SignMessageNext(session SessionHandle, parameter any, data []byte) ([]byte, error) {
 	arena := &nativeArena{}
 	defer arena.close()
-	parameterPointer, parameterLength, _, err := marshalParameterInto(arena, parameter)
+	parameterPointer, parameterLength, metadata, err := marshalParameterInto(arena, parameter)
 	if err != nil {
 		return nil, err
 	}
+	defer metadata.sync()
 	inputPointer, err := nativeCopy(arena, data)
 	if err != nil {
 		return nil, err
@@ -159,10 +163,11 @@ func (c *Ctx) MessageVerifyFinal(session SessionHandle) error {
 func (c *Ctx) messageCrypt(id functionID, session SessionHandle, parameter any, associatedData, input []byte) ([]byte, error) {
 	arena := &nativeArena{}
 	defer arena.close()
-	parameterPointer, parameterLength, _, err := marshalParameterInto(arena, parameter)
+	parameterPointer, parameterLength, metadata, err := marshalParameterInto(arena, parameter)
 	if err != nil {
 		return nil, err
 	}
+	defer metadata.sync()
 	aadPointer, err := nativeCopy(arena, associatedData)
 	if err != nil {
 		return nil, err
@@ -187,10 +192,11 @@ func (c *Ctx) messageCrypt(id functionID, session SessionHandle, parameter any, 
 func (c *Ctx) messageNext(id functionID, session SessionHandle, parameter any, input []byte, flags uint) ([]byte, error) {
 	arena := &nativeArena{}
 	defer arena.close()
-	parameterPointer, parameterLength, _, err := marshalParameterInto(arena, parameter)
+	parameterPointer, parameterLength, metadata, err := marshalParameterInto(arena, parameter)
 	if err != nil {
 		return nil, err
 	}
+	defer metadata.sync()
 	inputPointer, err := nativeCopy(arena, input)
 	if err != nil {
 		return nil, err
@@ -210,10 +216,11 @@ func (c *Ctx) messageNext(id functionID, session SessionHandle, parameter any, i
 func (c *Ctx) messageVerify(id functionID, session SessionHandle, parameter any, data, signature []byte) error {
 	arena := &nativeArena{}
 	defer arena.close()
-	parameterPointer, parameterLength, _, err := marshalParameterInto(arena, parameter)
+	parameterPointer, parameterLength, metadata, err := marshalParameterInto(arena, parameter)
 	if err != nil {
 		return err
 	}
+	defer metadata.sync()
 	dataPointer, err := nativeCopy(arena, data)
 	if err != nil {
 		return err
@@ -235,10 +242,11 @@ func (c *Ctx) messageVerify(id functionID, session SessionHandle, parameter any,
 func (c *Ctx) parameterSessionCall(id functionID, session SessionHandle, parameter any) error {
 	arena := &nativeArena{}
 	defer arena.close()
-	parameterPointer, parameterLength, _, err := marshalParameterInto(arena, parameter)
+	parameterPointer, parameterLength, metadata, err := marshalParameterInto(arena, parameter)
 	if err != nil {
 		return err
 	}
+	defer metadata.sync()
 	_, unlock, err := c.locked()
 	if err != nil {
 		return err

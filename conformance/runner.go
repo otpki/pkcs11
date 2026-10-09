@@ -3,6 +3,7 @@ package conformance
 import (
 	"context"
 	"crypto"
+	_ "crypto/md5"  // Register crypto.MD5 for legacy digest conformance cases.
 	_ "crypto/sha1" // Register crypto.SHA1 for legacy OAEP conformance cases.
 	_ "crypto/sha3" // Register the SHA-3 family for SHA-3 conformance cases.
 	"errors"
@@ -134,6 +135,12 @@ func (r *Runner) execute(ctx context.Context, testCase Case) (map[string]any, er
 		return r.testAuthenticatedWrap(ctx, testCase)
 	case "derive-ecdh":
 		return r.testECDH(ctx, testCase)
+	case "derive-hash":
+		return r.testDeriveHash(ctx, testCase)
+	case "derive-hkdf":
+		return r.testDeriveHKDF(ctx, testCase)
+	case "derive-ike":
+		return r.testDeriveIKE(ctx, testCase)
 	case "import-secret":
 		return r.testImportSecret(ctx, testCase)
 	case "message-sign":
@@ -146,10 +153,60 @@ func (r *Runner) execute(ctx context.Context, testCase Case) (map[string]any, er
 		return r.testKEM(ctx, testCase)
 	case "object-lifecycle":
 		return r.testObjectLifecycle(ctx, testCase)
+	case "trust-object":
+		return r.testTrustObject(ctx, testCase)
+	case "validation-object":
+		return r.testValidationObject(ctx, testCase)
+	case "message-aead":
+		return r.testMessageAEAD(ctx, testCase)
 	case "certificate":
 		return r.testCertificate(ctx, testCase)
 	case "idle-recovery":
 		return r.testIdleRecovery(ctx, testCase)
+	case "dsa":
+		return r.testDSA(ctx, testCase)
+	case "parameter-gen":
+		return r.testParameterGen(ctx, testCase)
+	case "derive-dh":
+		return r.testDH(ctx, testCase)
+	case "derive-montgomery":
+		return r.testMontgomery(ctx, testCase)
+	case "mac":
+		return r.testMAC(ctx, testCase)
+	case "derive-encrypt":
+		return r.testDeriveEncrypt(ctx, testCase)
+	case "derive-concatenate":
+		return r.testDeriveConcatenate(ctx, testCase)
+	case "derive-extract":
+		return r.testDeriveExtract(ctx, testCase)
+	case "rsa-aes-wrap":
+		return r.testRSAAESWrap(ctx, testCase)
+	case "derive-sp800":
+		return r.testDeriveSP800(ctx, testCase)
+	case "derive-tls":
+		return r.testDeriveTLS(ctx, testCase)
+	case "tls-mac":
+		return r.testTLSMAC(ctx, testCase)
+	case "hotp":
+		return r.testHOTP(ctx, testCase)
+	case "pbkdf2":
+		return r.testPBKDF2(ctx, testCase)
+	case "pub-key-from-priv":
+		return r.testPubKeyFromPriv(ctx, testCase)
+	case "hmac-keygen":
+		return r.testHMACKeyGen(ctx, testCase)
+	case "des":
+		return r.testDES(ctx, testCase)
+	case "token-prehash":
+		return r.testTokenPrehash(ctx, testCase)
+	case "derive-ike1-prf":
+		return r.testIKE1PRF(ctx, testCase)
+	case "derive-ike2-prf-plus":
+		return r.testIKE2PRFPlus(ctx, testCase)
+	case "derive-ike1-extended":
+		return r.testIKE1Extended(ctx, testCase)
+	case "profile-object":
+		return r.testProfileObject(ctx, testCase)
 	default:
 		kind := strings.ToLower(strings.TrimSpace(testCase.Kind))
 		if extension := r.extensions.byKind[kind]; extension != nil {
@@ -190,8 +247,14 @@ func hashByName(name string, fallback crypto.Hash) (crypto.Hash, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "", "default":
 		return fallback, nil
+	case "md5":
+		return crypto.MD5, nil
 	case "sha1", "sha-1":
 		return crypto.SHA1, nil
+	case "sha512-224", "sha-512-224":
+		return crypto.SHA512_224, nil
+	case "sha512-256", "sha-512-256":
+		return crypto.SHA512_256, nil
 	case "sha256", "sha-256":
 		return crypto.SHA256, nil
 	case "sha384", "sha-384":
