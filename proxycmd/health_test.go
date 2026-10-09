@@ -622,6 +622,9 @@ func TestHealthEndpointIntegration(t *testing.T) {
 	if modulePath == "" {
 		t.Skip("PKCS11_MODULE is not set")
 	}
+	if sessionScopedLogin(t, modulePath) {
+		t.Skip("vendor requires per-session physical login; the client-activated broker cannot serve it")
+	}
 	metricsHandler := installPrometheus(t)
 	cfg, err := loadOptions(nil)
 	if err != nil {

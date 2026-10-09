@@ -10,8 +10,7 @@ import (
 )
 
 // Fixtures returns the public SoftHSM conformance runtimes shipped by this
-// repository. SoftHSM 2 is the portable baseline; SoftHSM 3 remains a separate
-// suite because its availability and PKCS #11 3.x coverage differ by build.
+// repository. SoftHSM 2 is the portable baseline for the PKCS #11 3.x suite.
 func Fixtures() []containerfixture.Fixture {
 	return []containerfixture.Fixture{
 		containerfixture.New(containerfixture.Definition{

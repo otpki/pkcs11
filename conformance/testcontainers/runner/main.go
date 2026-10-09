@@ -60,6 +60,7 @@ func Main(providerFixtures []containerfixture.Fixture) {
 		nativeBackend string
 		legacyBackend string
 		timeout       time.Duration
+		image         string
 		buildLogs     bool
 		liveLogs      bool
 		assets        keyValueFlag
@@ -71,6 +72,7 @@ func Main(providerFixtures []containerfixture.Fixture) {
 	flag.StringVar(&nativeBackend, "backend", "", "native ABI backend to build inside provider images: cgo or purego; defaults to cgo")
 	flag.StringVar(&legacyBackend, "native-backend", "", "deprecated alias for -backend")
 	flag.DurationVar(&timeout, "timeout", 0, "override the selected fixture timeout")
+	flag.StringVar(&image, "image", "", "run a prebuilt provider image instead of building the fixture Dockerfile; requires exactly one provider")
 	flag.BoolVar(&buildLogs, "build-logs", true, "print Docker image build logs")
 	flag.BoolVar(&liveLogs, "live-logs", true, "stream container startup and conformance logs")
 	flag.Var(&assets, "asset", "provider asset as NAME=PATH; repeatable (provider.NAME=PATH also works)")
@@ -104,6 +106,12 @@ func Main(providerFixtures []containerfixture.Fixture) {
 	if err != nil {
 		fatal(err)
 	}
+	// One image can only ever describe one provider runtime, so a caller-
+	// supplied image requires a single provider selection.
+	image = strings.TrimSpace(image)
+	if image != "" && len(selectedFixtures) != 1 {
+		fatal(fmt.Errorf("-image %q requires exactly one provider, got %d", image, len(selectedFixtures)))
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -121,7 +129,7 @@ func Main(providerFixtures []containerfixture.Fixture) {
 			Assets:         fixtureAssets,
 			Environment:    normalizedEnvironment(env),
 		}
-		if err := runFixture(ctx, output, fixture, definition, request, nativeBackend, fixtureTimeout, buildLogs, liveLogs); err != nil {
+		if err := runFixture(ctx, output, fixture, definition, request, nativeBackend, image, fixtureTimeout, buildLogs, liveLogs); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -144,7 +152,7 @@ func selectFixtures(value string, fixtures []containerfixture.Fixture, definitio
 		}
 		slices.Sort(names)
 	} else {
-		for _, name := range strings.SplitSeq(value, ",") {
+		for name := range strings.SplitSeq(value, ",") {
 			if name = strings.TrimSpace(name); name != "" {
 				names = append(names, name)
 			}
@@ -204,6 +212,7 @@ func runFixture(
 	definition containerfixture.Definition,
 	request containerfixture.Request,
 	nativeBackend string,
+	image string,
 	timeout time.Duration,
 	buildLogs bool,
 	liveLogs bool,
@@ -270,21 +279,28 @@ func runFixture(
 			Consumers: []testcontainers.LogConsumer{&prefixedLogConsumer{provider: definition.ID}},
 		}
 	}
-	if prepared.Platform != "" {
-		image := fromDockerfile.Repo + ":" + fromDockerfile.Tag
+	switch {
+	case image != "":
+		// A caller-supplied image (for example a CI build exported through the
+		// BuildKit cache) skips the Dockerfile build entirely.
+		requestContainer.FromDockerfile = testcontainers.FromDockerfile{}
+		requestContainer.Image = image
+		stage(definition.ID, "start container from image "+image)
+	case prepared.Platform != "":
+		builtImage := fromDockerfile.Repo + ":" + fromDockerfile.Tag
 		stage(definition.ID, "build "+nativeBackend+" image with buildx")
-		err := buildPlatformImage(runCtx, prepared.BuildContext, prepared.Dockerfile, image, nativeBackend, prepared.Platform, false, buildLogs)
+		err := buildPlatformImage(runCtx, prepared.BuildContext, prepared.Dockerfile, builtImage, nativeBackend, prepared.Platform, false, buildLogs)
 		if err != nil && isDockerCacheFailure(err) {
 			stage(definition.ID, "inconsistent Docker cache detected; retry buildx without cache")
-			err = buildPlatformImage(runCtx, prepared.BuildContext, prepared.Dockerfile, image, nativeBackend, prepared.Platform, true, buildLogs)
+			err = buildPlatformImage(runCtx, prepared.BuildContext, prepared.Dockerfile, builtImage, nativeBackend, prepared.Platform, true, buildLogs)
 		}
 		if err != nil {
 			return fmt.Errorf("%s: build platform image: %w%s", definition.ID, err, dockerBuildHint(err))
 		}
 		requestContainer.FromDockerfile = testcontainers.FromDockerfile{}
-		requestContainer.Image = image
+		requestContainer.Image = builtImage
 		stage(definition.ID, "start conformance container")
-	} else {
+	default:
 		stage(definition.ID, "build "+nativeBackend+" image and start container")
 	}
 	container, err := testcontainers.GenericContainer(runCtx, testcontainers.GenericContainerRequest{
@@ -369,7 +385,7 @@ func (consumer *prefixedLogConsumer) Accept(log testcontainers.Log) {
 	consumer.mu.Lock()
 	defer consumer.mu.Unlock()
 	content := strings.TrimRight(string(log.Content), "\r\n")
-	for _, line := range strings.SplitSeq(content, "\n") {
+	for line := range strings.SplitSeq(content, "\n") {
 		if line != "" {
 			fmt.Fprintf(os.Stderr, "p11containers: %s: %s\n", consumer.provider, line)
 		}
@@ -595,7 +611,7 @@ func findRepositoryRoot() (string, error) {
 }
 
 func isRootModule(data []byte) bool {
-	for _, line := range strings.SplitSeq(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "//") {
 			continue
