@@ -134,12 +134,51 @@ func (c *Client) prepareCipherIntent(ctx context.Context, operation Operation, k
 			if len(iv) == 0 && operation == OperationDecrypt && cipherBehavior.gcmIVMode != VendorGCMIVCiphertextPrefix {
 				return Intent{}, nil, errors.New("pkcs11: AES-GCM decryption requires the IV returned by Encrypt")
 			}
-		case CipherModeCBC, CipherModeCTR:
+		case CipherModeCBC, CipherModeCTR, CipherModeCTS, CipherModeOFB,
+			CipherModeCFB, CipherModeCFB8, CipherModeCFB1:
 			if len(iv) != 16 {
 				return Intent{}, nil, fmt.Errorf("pkcs11: AES-%s requires a 16-byte IV/counter", mode)
 			}
+		case CipherModeECB:
+			if len(iv) != 0 {
+				return Intent{}, nil, errors.New("pkcs11: AES-ECB does not take an IV")
+			}
+		case CipherModeCCM:
+			if len(iv) < 7 || len(iv) > 13 {
+				return Intent{}, nil, errors.New("pkcs11: AES-CCM requires a 7-to-13-byte nonce in IV")
+			}
+			if options.TagBits != 0 && (options.TagBits%16 != 0 || options.TagBits < 32 || options.TagBits > 128) {
+				return Intent{}, nil, errors.New("pkcs11: AES-CCM tag length must be an even number of bytes between 4 and 16")
+			}
 		default:
 			return Intent{}, nil, fmt.Errorf("pkcs11: unsupported AES cipher mode %q", mode)
+		}
+		options.Mode = mode
+	}
+	if algorithm == AlgorithmChaCha20 {
+		mode := options.Mode
+		if mode == "" {
+			mode = CipherModeChaCha20Poly1305
+		}
+		switch mode {
+		case CipherModeChaCha20Poly1305:
+			// The nonce always travels in the mechanism parameter, so the driver
+			// can safely generate one here regardless of vendor IV behavior.
+			if len(iv) == 0 && operation == OperationEncrypt {
+				iv, err = c.Random(ctx, 12)
+				if err != nil {
+					return Intent{}, nil, fmt.Errorf("pkcs11: generate ChaCha20-Poly1305 nonce: %w", err)
+				}
+			}
+			if len(iv) != 12 {
+				return Intent{}, nil, errors.New("pkcs11: ChaCha20-Poly1305 requires a 12-byte nonce")
+			}
+		case CipherModeChaCha20:
+			if len(iv) != 16 {
+				return Intent{}, nil, errors.New("pkcs11: ChaCha20 requires a 16-byte counter and nonce IV")
+			}
+		default:
+			return Intent{}, nil, fmt.Errorf("pkcs11: unsupported ChaCha20 cipher mode %q", mode)
 		}
 		options.Mode = mode
 	}
@@ -213,6 +252,10 @@ func (c *Client) Encrypt(ctx context.Context, key ObjectRef, plaintext []byte, o
 	if err != nil {
 		return EncryptionResult{}, err
 	}
+	if ccm, ok := route.Mechanism.Parameter.(raw.CCMParams); ok {
+		ccm.DataLen = uint(len(plaintext))
+		route.Mechanism.Parameter = ccm
+	}
 	gcm := retainGCMParameter(&route)
 	var ciphertext []byte
 	err = c.withSession(ctx, sessionOptions{Operation: "encrypt"}, func(session *sessionLease) error {
@@ -261,6 +304,14 @@ func (c *Client) Decrypt(ctx context.Context, key ObjectRef, ciphertext []byte, 
 	if err != nil {
 		return nil, err
 	}
+	if ccm, ok := route.Mechanism.Parameter.(raw.CCMParams); ok {
+		macLen := int(ccm.MACLen)
+		if macLen == 0 {
+			macLen = 16
+		}
+		ccm.DataLen = uint(max(len(ciphertext)-macLen, 0))
+		route.Mechanism.Parameter = ccm
+	}
 	var plaintext []byte
 	err = c.withSession(ctx, sessionOptions{Operation: "decrypt", Idempotent: true}, func(session *sessionLease) error {
 		handle, err := resolveObject(ctx, session, key)
@@ -285,10 +336,11 @@ func macAlgorithm(key ObjectRef, requested Algorithm) (Algorithm, error) {
 		algorithm = key.Algorithm
 	}
 	switch algorithm {
-	case AlgorithmHMACSHA256, AlgorithmHMACSHA384, AlgorithmHMACSHA512:
+	case AlgorithmHMACSHA256, AlgorithmHMACSHA384, AlgorithmHMACSHA512,
+		AlgorithmAES128, AlgorithmAES192, AlgorithmAES256:
 		return algorithm, nil
 	default:
-		return "", fmt.Errorf("pkcs11: MAC requires an HMAC algorithm, got %q", algorithm)
+		return "", fmt.Errorf("pkcs11: MAC requires an HMAC or AES-CMAC algorithm, got %q", algorithm)
 	}
 }
 

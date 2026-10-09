@@ -148,6 +148,10 @@ type KeyPairOptions struct {
 	// are intentionally application-controlled, such as XMSS/XMSSMT.
 	ParameterSet uint
 
+	// DomainParameters supplies CKA_PRIME/CKA_BASE (and CKA_SUBPRIME for DSA)
+	// on the public template. Required for AlgorithmDSA and AlgorithmDH.
+	DomainParameters *DomainParameters
+
 	// HSS describes an HSS hierarchy. AlgorithmLMS uses the same structure
 	// with exactly one level. A vendor module may encode these values into its
 	// vendor generation parameter block automatically.
@@ -275,7 +279,7 @@ func usageAttributes(algorithm Algorithm, class uint) []*raw.Attribute {
 		if private {
 			return []*raw.Attribute{raw.NewAttribute(raw.CKA_SIGN, true), raw.NewAttribute(raw.CKA_DECRYPT, true), raw.NewAttribute(raw.CKA_UNWRAP, true)}
 		}
-	case AlgorithmECDSAP256, AlgorithmECDSAP384, AlgorithmECDSAP521, AlgorithmEd25519, AlgorithmEd448, AlgorithmHSS, AlgorithmXMSS, AlgorithmXMSSMT,
+	case AlgorithmECDSAP256, AlgorithmECDSAP384, AlgorithmECDSAP521, AlgorithmDSA, AlgorithmEd25519, AlgorithmEd448, AlgorithmHSS, AlgorithmXMSS, AlgorithmXMSSMT,
 		AlgorithmDilithium2, AlgorithmDilithium3, AlgorithmDilithium5, AlgorithmFalcon512, AlgorithmFalcon1024, AlgorithmSPHINCSPlus, AlgorithmComposite, AlgorithmHybrid,
 		AlgorithmMLDSA44, AlgorithmMLDSA65, AlgorithmMLDSA87,
 		AlgorithmSLHDSASHA2128S, AlgorithmSLHDSASHAKE128S, AlgorithmSLHDSASHA2128F, AlgorithmSLHDSASHAKE128F,
@@ -287,6 +291,10 @@ func usageAttributes(algorithm Algorithm, class uint) []*raw.Attribute {
 		if private {
 			return []*raw.Attribute{raw.NewAttribute(raw.CKA_SIGN, true)}
 		}
+	case AlgorithmDH, AlgorithmX25519, AlgorithmX448:
+		if private {
+			return []*raw.Attribute{raw.NewAttribute(raw.CKA_DERIVE, true)}
+		}
 	case AlgorithmMLKEM512, AlgorithmMLKEM768, AlgorithmMLKEM1024, AlgorithmKyber512, AlgorithmKyber768, AlgorithmKyber1024:
 		if public {
 			return []*raw.Attribute{raw.NewAttribute(raw.CKA_ENCAPSULATE, true)}
@@ -294,9 +302,9 @@ func usageAttributes(algorithm Algorithm, class uint) []*raw.Attribute {
 		if private {
 			return []*raw.Attribute{raw.NewAttribute(raw.CKA_DECAPSULATE, true)}
 		}
-	case AlgorithmAES128, AlgorithmAES192, AlgorithmAES256:
+	case AlgorithmAES128, AlgorithmAES192, AlgorithmAES256, AlgorithmChaCha20:
 		if secret {
-			return []*raw.Attribute{raw.NewAttribute(raw.CKA_ENCRYPT, true), raw.NewAttribute(raw.CKA_DECRYPT, true), raw.NewAttribute(raw.CKA_WRAP, true), raw.NewAttribute(raw.CKA_UNWRAP, true)}
+			return []*raw.Attribute{raw.NewAttribute(raw.CKA_ENCRYPT, true), raw.NewAttribute(raw.CKA_DECRYPT, true), raw.NewAttribute(raw.CKA_WRAP, true), raw.NewAttribute(raw.CKA_UNWRAP, true), raw.NewAttribute(raw.CKA_SIGN, true), raw.NewAttribute(raw.CKA_VERIFY, true)}
 		}
 	case AlgorithmHMACSHA256, AlgorithmHMACSHA384, AlgorithmHMACSHA512:
 		if secret {
@@ -426,7 +434,10 @@ func (c *Client) GenerateKeyPair(ctx context.Context, options KeyPairOptions) (K
 	if !ok || !spec.KeyPair {
 		return KeyPair{}, fmt.Errorf("pkcs11: %s is not a key-pair algorithm", options.Algorithm)
 	}
-	route, err := c.Resolve(Intent{Operation: OperationGenerate, Algorithm: options.Algorithm, MechanismOverride: options.MechanismOverride, MechanismParameter: options.MechanismParameter})
+	if (options.Algorithm == AlgorithmDSA || options.Algorithm == AlgorithmDH) && options.DomainParameters == nil && options.MechanismOverride == nil {
+		return KeyPair{}, fmt.Errorf("pkcs11: %s key generation requires DomainParameters", options.Algorithm)
+	}
+	route, err := c.Resolve(Intent{Operation: OperationGenerate, Algorithm: options.Algorithm, MechanismOverride: options.MechanismOverride, MechanismParameter: options.MechanismParameter, DomainParameters: options.DomainParameters})
 	if err != nil {
 		return KeyPair{}, err
 	}

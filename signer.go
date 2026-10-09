@@ -3,6 +3,7 @@ package pkcs11
 import (
 	"context"
 	"crypto"
+	"crypto/dsa"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -301,7 +302,7 @@ func (s *Signer) signIntent(input []byte, opts crypto.SignerOpts, messageLevel b
 			}
 			intent.PSSSaltLength = saltLength
 		}
-	case AlgorithmECDSAP256, AlgorithmECDSAP384, AlgorithmECDSAP521:
+	case AlgorithmECDSAP256, AlgorithmECDSAP384, AlgorithmECDSAP521, AlgorithmDSA:
 		if _, custom := signatureOptions(opts); !custom {
 			intent.Prehashed = !messageLevel
 		}
@@ -481,7 +482,7 @@ func (c *Client) sign(ctx context.Context, private ObjectRef, intent Intent, inp
 	if err != nil {
 		return nil, err
 	}
-	if intent.Algorithm == AlgorithmECDSAP256 || intent.Algorithm == AlgorithmECDSAP384 || intent.Algorithm == AlgorithmECDSAP521 {
+	if intent.Algorithm == AlgorithmECDSAP256 || intent.Algorithm == AlgorithmECDSAP384 || intent.Algorithm == AlgorithmECDSAP521 || intent.Algorithm == AlgorithmDSA {
 		return ecdsaRawToDER(signature)
 	}
 	return signature, nil
@@ -563,6 +564,9 @@ func (c *Client) loadPublicKey(ctx context.Context, object ObjectRef, algorithm 
 		raw.NewAttribute(raw.CKA_EC_PARAMS, nil),
 		raw.NewAttribute(raw.CKA_VALUE, nil),
 		raw.NewAttribute(raw.CKA_PUBLIC_KEY_INFO, nil),
+		raw.NewAttribute(raw.CKA_PRIME, nil),
+		raw.NewAttribute(raw.CKA_SUBPRIME, nil),
+		raw.NewAttribute(raw.CKA_BASE, nil),
 	}
 	values, queryErr := c.Attributes(ctx, object, attributes...)
 	if queryErr != nil && len(values) == 0 {
@@ -600,6 +604,15 @@ func (c *Client) loadPublicKey(ctx context.Context, object ObjectRef, algorithm 
 		}
 		//nolint:staticcheck // Building a public key from CKA_EC_POINT coordinates is intentional.
 		return &ecdsa.PublicKey{Curve: curve, X: x, Y: y}, nil
+	case AlgorithmDSA:
+		p := new(big.Int).SetBytes(byType[raw.CKA_PRIME])
+		q := new(big.Int).SetBytes(byType[raw.CKA_SUBPRIME])
+		g := new(big.Int).SetBytes(byType[raw.CKA_BASE])
+		y := new(big.Int).SetBytes(byType[raw.CKA_VALUE])
+		if p.Sign() == 0 || q.Sign() == 0 || g.Sign() == 0 || y.Sign() == 0 {
+			return nil, errors.New("pkcs11: invalid DSA public attributes")
+		}
+		return &dsa.PublicKey{P: p, Q: q, G: g, Y: y}, nil
 	case AlgorithmEd25519:
 		point := unwrapOctetString(byType[raw.CKA_EC_POINT])
 		if len(point) == 0 {
@@ -652,6 +665,16 @@ func (c *Client) Verify(ctx context.Context, public ObjectRef, data, signature [
 			width = 66
 		}
 		signature, err = ecdsaDERToRaw(signature, width)
+		if err != nil {
+			return err
+		}
+	}
+	if intent.Algorithm == AlgorithmDSA {
+		values, attrErr := c.Attributes(ctx, public, raw.NewAttribute(raw.CKA_SUBPRIME, nil))
+		if attrErr != nil || len(values) == 0 || len(values[0].Value) == 0 {
+			return errors.New("pkcs11: DSA verification requires the public key's CKA_SUBPRIME")
+		}
+		signature, err = ecdsaDERToRaw(signature, len(values[0].Value))
 		if err != nil {
 			return err
 		}
