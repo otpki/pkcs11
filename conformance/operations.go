@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/dsa"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -132,17 +134,27 @@ func (r *Runner) testSession(ctx context.Context, _ Case) (map[string]any, error
 	}, nil
 }
 
-func (r *Runner) testDigest(ctx context.Context, _ Case) (map[string]any, error) {
-	message := []byte("otpki-pkcs11 digest conformance")
-	expected := sha256.Sum256(message)
-	actual, err := r.client.Digest(ctx, message, pkcs11.DigestOptions{Hash: crypto.SHA256})
+func (r *Runner) testDigest(ctx context.Context, testCase Case) (map[string]any, error) {
+	hash, err := hashByName(testCase.Hash, crypto.SHA256)
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(actual, expected[:]) {
-		return nil, errors.New("conformance: token SHA-256 output differs from Go SHA-256")
+	if !hash.Available() {
+		return nil, fmt.Errorf("conformance: hash %v is unavailable in this Go build: %w", hash, raw.Error(raw.CKR_FUNCTION_NOT_SUPPORTED))
 	}
-	return map[string]any{"digest_bytes": len(actual)}, nil
+	message := []byte("otpki-pkcs11 digest conformance")
+	expected, err := hashInput(hash, message)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", err, raw.Error(raw.CKR_FUNCTION_NOT_SUPPORTED))
+	}
+	actual, err := r.client.Digest(ctx, message, pkcs11.DigestOptions{Hash: hash})
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(actual, expected) {
+		return nil, fmt.Errorf("conformance: token %v output differs from the Go digest", hash)
+	}
+	return map[string]any{"hash": hash.String(), "digest_bytes": len(actual)}, nil
 }
 
 func (r *Runner) testConcurrency(ctx context.Context, testCase Case) (map[string]any, error) {
@@ -225,6 +237,10 @@ func (r *Runner) testSign(ctx context.Context, testCase Case) (map[string]any, e
 	message := testMessage(testCase.MessageBytes)
 	input := message
 	var opts crypto.SignerOpts
+	// tokenHashed marks combined mechanisms where the token digests the message
+	// internally, so the Go oracle must verify over the digest rather than the
+	// input the token received.
+	tokenHashed := false
 	intent := pkcs11.Intent{Algorithm: testCase.Algorithm, Hash: hash, Context: []byte(testCase.Context)}
 
 	switch testCase.Algorithm {
@@ -243,12 +259,18 @@ func (r *Runner) testSign(ctx context.Context, testCase Case) (map[string]any, e
 			intent.RSAPadding = pkcs11.RSAPaddingPKCS1v15
 		}
 	case pkcs11.AlgorithmECDSAP256, pkcs11.AlgorithmECDSAP384, pkcs11.AlgorithmECDSAP521:
-		input, err = hashInput(hash, message)
-		if err != nil {
-			return nil, err
+		if strings.EqualFold(testCase.Variant, "token-hash") {
+			// The combined mechanism digests the message inside the token.
+			opts = pkcs11.SignatureOptions{Hash: hash}
+			tokenHashed = true
+		} else {
+			input, err = hashInput(hash, message)
+			if err != nil {
+				return nil, err
+			}
+			opts = hash
+			intent.Prehashed = true
 		}
-		opts = hash
-		intent.Prehashed = true
 	case pkcs11.AlgorithmEd25519, pkcs11.AlgorithmEd448:
 		opts = crypto.Hash(0)
 		intent.Hash = 0
@@ -317,7 +339,15 @@ func (r *Runner) testSign(ctx context.Context, testCase Case) (map[string]any, e
 	if err := r.client.Verify(ctx, pair.Public, input, signature, signatureOptionsFromIntent(intent)); err != nil {
 		return nil, cleanup(fmt.Errorf("verify generated signature: %w", err))
 	}
-	softwareVerified, err := verifyWithGo(signer.Public(), testCase.Algorithm, hash, padding, input, signature)
+	// The Go oracle verifies over a digest, so when the token hashed the
+	// message internally the software-side input becomes the computed digest.
+	softwareInput := input
+	if tokenHashed {
+		if softwareInput, err = hashInput(hash, message); err != nil {
+			return nil, cleanup(err)
+		}
+	}
+	softwareVerified, err := verifyWithGo(signer.Public(), testCase.Algorithm, hash, padding, softwareInput, signature)
 	if err != nil {
 		return nil, cleanup(fmt.Errorf("verify generated signature with Go: %w", err))
 	}
@@ -384,6 +414,27 @@ func (r *Runner) testSymmetricEncrypt(ctx context.Context, testCase Case) (map[s
 		mode, iv, aad = pkcs11.CipherModeCBC, bytes.Repeat([]byte{0x24}, 16), nil
 	case "ctr":
 		mode, iv, aad = pkcs11.CipherModeCTR, bytes.Repeat([]byte{0x11}, 16), nil
+	case "ccm":
+		// CCM requires a 7-13 byte nonce.
+		mode, iv = pkcs11.CipherModeCCM, bytes.Repeat([]byte{0x59}, 12)
+	case "cts":
+		mode, iv, aad = pkcs11.CipherModeCTS, bytes.Repeat([]byte{0x61}, 16), nil
+	case "ofb":
+		mode, iv, aad = pkcs11.CipherModeOFB, bytes.Repeat([]byte{0x62}, 16), nil
+	case "cfb128", "cfb":
+		mode, iv, aad = pkcs11.CipherModeCFB, bytes.Repeat([]byte{0x63}, 16), nil
+	case "cfb8":
+		mode, iv, aad = pkcs11.CipherModeCFB8, bytes.Repeat([]byte{0x64}, 16), nil
+	case "cfb1":
+		mode, iv, aad = pkcs11.CipherModeCFB1, bytes.Repeat([]byte{0x65}, 16), nil
+	case "ecb":
+		// ECB carries no IV and no padding; the plaintext must align to a
+		// block boundary, which the default testMessage length already does.
+		mode, iv, aad = pkcs11.CipherModeECB, nil, nil
+	case "chacha20-poly1305":
+		mode = pkcs11.CipherModeChaCha20Poly1305
+	case "chacha20":
+		mode, iv, aad = pkcs11.CipherModeChaCha20, bytes.Repeat([]byte{0x33}, 16), nil
 	case "", "gcm":
 	default:
 		return nil, errorsJoin(fmt.Errorf("conformance: unknown cipher variant %q", testCase.Variant), r.cleanup(ctx, key))
@@ -460,7 +511,20 @@ func (r *Runner) testRSAEncrypt(ctx context.Context, testCase Case) (map[string]
 	return map[string]any{"padding": padding, "ciphertext_bytes": len(encrypted.Ciphertext)}, cleanupErr
 }
 
-func (r *Runner) testWrap(ctx context.Context, _ Case) (map[string]any, error) {
+func (r *Runner) testWrap(ctx context.Context, testCase Case) (map[string]any, error) {
+	mechanismID := raw.CKM_AES_KEY_WRAP_PAD
+	switch strings.ToLower(testCase.Variant) {
+	case "", "pad":
+	case "kwp":
+		mechanismID = raw.CKM_AES_KEY_WRAP_KWP
+	case "pkcs7":
+		mechanismID = raw.CKM_AES_KEY_WRAP_PKCS7
+	default:
+		return nil, fmt.Errorf("conformance: unknown wrap variant %q", testCase.Variant)
+	}
+	if err := r.requireAdvertisedMechanism(mechanismID, raw.CKF_WRAP|raw.CKF_UNWRAP); err != nil {
+		return nil, err
+	}
 	identity := r.identity("wrap")
 	wrapping, err := r.client.GenerateSecretKey(ctx, pkcs11.SecretKeyOptions{Algorithm: pkcs11.AlgorithmAES256, Label: identity + "-kek", ID: []byte(identity + "-kek")})
 	if err != nil {
@@ -473,7 +537,7 @@ func (r *Runner) testWrap(ctx context.Context, _ Case) (map[string]any, error) {
 	if err != nil {
 		return nil, errorsJoin(err, r.cleanup(ctx, wrapping))
 	}
-	mechanism := raw.NewMechanism(raw.CKM_AES_KEY_WRAP_PAD, nil)
+	mechanism := raw.NewMechanism(mechanismID, nil)
 	wrapped, err := r.client.Wrap(ctx, wrapping, target, pkcs11.WrapOptions{Mechanism: mechanism})
 	if err != nil {
 		return nil, errorsJoin(err, r.cleanup(ctx, target, wrapping))
@@ -743,6 +807,451 @@ func (r *Runner) ecPoint(ctx context.Context, object pkcs11.ObjectRef) ([]byte, 
 	return slices.Clone(attributes[0].Value), nil
 }
 
+// keyDerivationHashMechanism maps a case variant to a CKM_*_KEY_DERIVATION
+// mechanism and the digest it performs on the base key value
+func keyDerivationHashMechanism(variant string) (uint, crypto.Hash, error) {
+	switch strings.ToLower(strings.TrimSpace(variant)) {
+	case "sha1":
+		return raw.CKM_SHA1_KEY_DERIVATION, crypto.SHA1, nil
+	case "sha224":
+		return raw.CKM_SHA224_KEY_DERIVATION, crypto.SHA224, nil
+	case "sha256":
+		return raw.CKM_SHA256_KEY_DERIVATION, crypto.SHA256, nil
+	case "sha384":
+		return raw.CKM_SHA384_KEY_DERIVATION, crypto.SHA384, nil
+	case "sha512":
+		return raw.CKM_SHA512_KEY_DERIVATION, crypto.SHA512, nil
+	case "sha512-224":
+		return raw.CKM_SHA512_224_KEY_DERIVATION, crypto.SHA512_224, nil
+	case "sha512-256":
+		return raw.CKM_SHA512_256_KEY_DERIVATION, crypto.SHA512_256, nil
+	case "sha3-224":
+		return raw.CKM_SHA3_224_KEY_DERIVATION, crypto.SHA3_224, nil
+	case "sha3-256":
+		return raw.CKM_SHA3_256_KEY_DERIVATION, crypto.SHA3_256, nil
+	case "sha3-384":
+		return raw.CKM_SHA3_384_KEY_DERIVATION, crypto.SHA3_384, nil
+	case "sha3-512":
+		return raw.CKM_SHA3_512_KEY_DERIVATION, crypto.SHA3_512, nil
+	default:
+		return 0, 0, fmt.Errorf("conformance: unknown derive-hash variant %q", variant)
+	}
+}
+
+// testDeriveHash derives a key by hashing the base key value and compares the
+// result with the equivalent software digest
+func (r *Runner) testDeriveHash(ctx context.Context, testCase Case) (map[string]any, error) {
+	mechanism, hash, err := keyDerivationHashMechanism(testCase.Variant)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.requireAdvertisedMechanism(mechanism, raw.CKF_DERIVE); err != nil {
+		return nil, err
+	}
+	if !hash.Available() {
+		return nil, fmt.Errorf("conformance: hash %v is unavailable in this Go build: %w", hash, raw.Error(raw.CKR_FUNCTION_NOT_SUPPORTED))
+	}
+	identity := r.identity(testCase.Name)
+	ikm := testMessage(64)
+	base := pkcs11.ObjectRef{Class: raw.CKO_SECRET_KEY, KeyType: raw.CKK_GENERIC_SECRET, Label: identity + "-base", ID: []byte(identity + "-base")}
+	var derived []byte
+	err = r.withSessionOptions(ctx, pkcs11.RawSessionOptions{Operation: "conformance-derive-hash", ReadWrite: true}, func(session *testSession) (operationErr error) {
+		baseHandle, err := session.CreateObject([]*raw.Attribute{
+			raw.NewAttribute(raw.CKA_CLASS, raw.CKO_SECRET_KEY),
+			raw.NewAttribute(raw.CKA_KEY_TYPE, raw.CKK_GENERIC_SECRET),
+			raw.NewAttribute(raw.CKA_TOKEN, true),
+			raw.NewAttribute(raw.CKA_PRIVATE, true),
+			raw.NewAttribute(raw.CKA_SENSITIVE, false),
+			raw.NewAttribute(raw.CKA_EXTRACTABLE, true),
+			raw.NewAttribute(raw.CKA_DERIVE, true),
+			raw.NewAttribute(raw.CKA_LABEL, base.Label),
+			raw.NewAttribute(raw.CKA_ID, base.ID),
+			raw.NewAttribute(raw.CKA_VALUE, ikm),
+		})
+		if err != nil {
+			return err
+		}
+		base.Handle = baseHandle
+		derivedHandle, err := session.DeriveKey([]*raw.Mechanism{raw.NewMechanism(mechanism, nil)}, baseHandle, []*raw.Attribute{
+			raw.NewAttribute(raw.CKA_CLASS, raw.CKO_SECRET_KEY),
+			raw.NewAttribute(raw.CKA_KEY_TYPE, raw.CKK_GENERIC_SECRET),
+			raw.NewAttribute(raw.CKA_TOKEN, false),
+			raw.NewAttribute(raw.CKA_PRIVATE, true),
+			raw.NewAttribute(raw.CKA_SENSITIVE, false),
+			raw.NewAttribute(raw.CKA_EXTRACTABLE, true),
+			raw.NewAttribute(raw.CKA_VALUE_LEN, uint(hash.Size())),
+		})
+		if err != nil {
+			return err
+		}
+		defer func() { operationErr = errorsJoin(operationErr, session.DestroyObject(derivedHandle)) }()
+		attrs, err := session.GetAttributeValue(derivedHandle, []*raw.Attribute{raw.NewAttribute(raw.CKA_VALUE, nil)})
+		if err != nil {
+			return err
+		}
+		if len(attrs) != 1 || len(attrs[0].Value) == 0 {
+			return errors.New("conformance: derived key has no CKA_VALUE")
+		}
+		derived = slices.Clone(attrs[0].Value)
+		return nil
+	})
+	cleanupErr := r.cleanup(ctx, base)
+	if err != nil {
+		return nil, errorsJoin(err, cleanupErr)
+	}
+	digest := hash.New()
+	_, _ = digest.Write(ikm)
+	if !bytes.Equal(derived, digest.Sum(nil)) {
+		return nil, errorsJoin(errors.New("conformance: derived key differs from the software digest of the base key"), cleanupErr)
+	}
+	return map[string]any{"hash": hash.String(), "secret_bytes": len(derived)}, cleanupErr
+}
+
+// digestMechanismForHash maps a Go hash to the CKM digest mechanism HKDF uses
+// as its PRF selector
+func digestMechanismForHash(hash crypto.Hash) (uint, error) {
+	switch hash {
+	case crypto.SHA1:
+		return raw.CKM_SHA_1, nil
+	case crypto.SHA256:
+		return raw.CKM_SHA256, nil
+	case crypto.SHA384:
+		return raw.CKM_SHA384, nil
+	case crypto.SHA512:
+		return raw.CKM_SHA512, nil
+	case crypto.SHA3_224:
+		return raw.CKM_SHA3_224, nil
+	case crypto.SHA3_256:
+		return raw.CKM_SHA3_256, nil
+	case crypto.SHA3_384:
+		return raw.CKM_SHA3_384, nil
+	case crypto.SHA3_512:
+		return raw.CKM_SHA3_512, nil
+	default:
+		return 0, fmt.Errorf("conformance: no digest mechanism for hash %v", hash)
+	}
+}
+
+// testDeriveHKDF runs CKM_HKDF_DERIVE with a known input key and compares the
+// derived secret with the Go standard library HKDF
+func (r *Runner) testDeriveHKDF(ctx context.Context, testCase Case) (map[string]any, error) {
+	if err := r.requireInterface(raw.Version{Major: 3, Minor: 0}); err != nil {
+		return nil, err
+	}
+	if err := r.requireAdvertisedMechanism(raw.CKM_HKDF_DERIVE, raw.CKF_DERIVE); err != nil {
+		return nil, err
+	}
+	hash, err := hashByName(testCase.Hash, crypto.SHA256)
+	if err != nil {
+		return nil, err
+	}
+	prf, err := digestMechanismForHash(hash)
+	if err != nil {
+		return nil, err
+	}
+	if !hash.Available() {
+		return nil, fmt.Errorf("conformance: hash %v is unavailable in this Go build: %w", hash, raw.Error(raw.CKR_FUNCTION_NOT_SUPPORTED))
+	}
+	identity := r.identity(testCase.Name)
+	ikm := testMessage(48)
+	salt := testMessage(20)
+	info := []byte("otpki-conformance-hkdf")
+	base := pkcs11.ObjectRef{Class: raw.CKO_SECRET_KEY, KeyType: raw.CKK_HKDF, Label: identity + "-base", ID: []byte(identity + "-base")}
+	var derived []byte
+	err = r.withSessionOptions(ctx, pkcs11.RawSessionOptions{Operation: "conformance-derive-hkdf", ReadWrite: true}, func(session *testSession) (operationErr error) {
+		baseHandle, err := session.CreateObject([]*raw.Attribute{
+			raw.NewAttribute(raw.CKA_CLASS, raw.CKO_SECRET_KEY),
+			raw.NewAttribute(raw.CKA_KEY_TYPE, raw.CKK_HKDF),
+			raw.NewAttribute(raw.CKA_TOKEN, true),
+			raw.NewAttribute(raw.CKA_PRIVATE, true),
+			raw.NewAttribute(raw.CKA_SENSITIVE, false),
+			raw.NewAttribute(raw.CKA_EXTRACTABLE, true),
+			raw.NewAttribute(raw.CKA_DERIVE, true),
+			raw.NewAttribute(raw.CKA_LABEL, base.Label),
+			raw.NewAttribute(raw.CKA_ID, base.ID),
+			raw.NewAttribute(raw.CKA_VALUE, ikm),
+		})
+		if err != nil {
+			return err
+		}
+		base.Handle = baseHandle
+		derivedHandle, err := session.DeriveKey([]*raw.Mechanism{raw.NewMechanism(raw.CKM_HKDF_DERIVE, raw.HKDFParams{
+			Extract:          true,
+			Expand:           true,
+			PRFHashMechanism: prf,
+			SaltType:         raw.CKF_HKDF_SALT_DATA,
+			Salt:             salt,
+			Info:             info,
+		})}, baseHandle, []*raw.Attribute{
+			raw.NewAttribute(raw.CKA_CLASS, raw.CKO_SECRET_KEY),
+			raw.NewAttribute(raw.CKA_KEY_TYPE, raw.CKK_GENERIC_SECRET),
+			raw.NewAttribute(raw.CKA_TOKEN, false),
+			raw.NewAttribute(raw.CKA_PRIVATE, true),
+			raw.NewAttribute(raw.CKA_SENSITIVE, false),
+			raw.NewAttribute(raw.CKA_EXTRACTABLE, true),
+			raw.NewAttribute(raw.CKA_VALUE_LEN, uint(hash.Size())),
+		})
+		if err != nil {
+			return err
+		}
+		defer func() { operationErr = errorsJoin(operationErr, session.DestroyObject(derivedHandle)) }()
+		attrs, err := session.GetAttributeValue(derivedHandle, []*raw.Attribute{raw.NewAttribute(raw.CKA_VALUE, nil)})
+		if err != nil {
+			return err
+		}
+		if len(attrs) != 1 || len(attrs[0].Value) == 0 {
+			return errors.New("conformance: derived HKDF key has no CKA_VALUE")
+		}
+		derived = slices.Clone(attrs[0].Value)
+		return nil
+	})
+	cleanupErr := r.cleanup(ctx, base)
+	if err != nil {
+		return nil, errorsJoin(err, cleanupErr)
+	}
+	expected, hkdfErr := hkdf.Key(hash.New, ikm, salt, string(info), hash.Size())
+	if hkdfErr != nil {
+		return nil, errorsJoin(fmt.Errorf("conformance: software HKDF failed: %w", hkdfErr), cleanupErr)
+	}
+	if !bytes.Equal(derived, expected) {
+		return nil, errorsJoin(errors.New("conformance: derived HKDF key differs from the RFC 5869 software result"), cleanupErr)
+	}
+	return map[string]any{"hash": hash.String(), "secret_bytes": len(derived), "software_verified": true}, cleanupErr
+}
+
+// testDeriveIKE runs CKM_IKE_PRF_DERIVE in data-as-key mode, which produces a
+// fresh key from the two nonces without referencing other key objects
+func (r *Runner) testDeriveIKE(ctx context.Context, testCase Case) (map[string]any, error) {
+	if err := r.requireInterface(raw.Version{Major: 3, Minor: 0}); err != nil {
+		return nil, err
+	}
+	if err := r.requireAdvertisedMechanism(raw.CKM_IKE_PRF_DERIVE, raw.CKF_DERIVE); err != nil {
+		return nil, err
+	}
+	// the PRF runs inside the provider so the HMAC mechanism must exist too
+	if err := r.requireAdvertisedMechanism(raw.CKM_SHA256_HMAC, 0); err != nil {
+		return nil, err
+	}
+	identity := r.identity(testCase.Name)
+	ni := testMessage(32)
+	nr := bytes.Repeat([]byte{0x6e}, 24)
+	base := pkcs11.ObjectRef{Class: raw.CKO_SECRET_KEY, KeyType: raw.CKK_GENERIC_SECRET, Label: identity + "-base", ID: []byte(identity + "-base")}
+	var derivedLength int
+	err := r.withSessionOptions(ctx, pkcs11.RawSessionOptions{Operation: "conformance-derive-ike", ReadWrite: true}, func(session *testSession) (operationErr error) {
+		baseHandle, err := session.CreateObject([]*raw.Attribute{
+			raw.NewAttribute(raw.CKA_CLASS, raw.CKO_SECRET_KEY),
+			raw.NewAttribute(raw.CKA_KEY_TYPE, raw.CKK_GENERIC_SECRET),
+			raw.NewAttribute(raw.CKA_TOKEN, true),
+			raw.NewAttribute(raw.CKA_PRIVATE, true),
+			raw.NewAttribute(raw.CKA_DERIVE, true),
+			raw.NewAttribute(raw.CKA_LABEL, base.Label),
+			raw.NewAttribute(raw.CKA_ID, base.ID),
+			raw.NewAttribute(raw.CKA_VALUE, testMessage(48)),
+		})
+		if err != nil {
+			return err
+		}
+		base.Handle = baseHandle
+		derivedHandle, err := session.DeriveKey([]*raw.Mechanism{raw.NewMechanism(raw.CKM_IKE_PRF_DERIVE, raw.IKEPRFDeriveParams{
+			PRFMechanism: raw.CKM_SHA256_HMAC,
+			DataAsKey:    true,
+			Ni:           ni,
+			Nr:           nr,
+		})}, baseHandle, []*raw.Attribute{
+			raw.NewAttribute(raw.CKA_CLASS, raw.CKO_SECRET_KEY),
+			raw.NewAttribute(raw.CKA_KEY_TYPE, raw.CKK_GENERIC_SECRET),
+			raw.NewAttribute(raw.CKA_TOKEN, false),
+			raw.NewAttribute(raw.CKA_PRIVATE, true),
+			raw.NewAttribute(raw.CKA_SENSITIVE, false),
+			raw.NewAttribute(raw.CKA_EXTRACTABLE, true),
+			raw.NewAttribute(raw.CKA_VALUE_LEN, uint(32)),
+		})
+		if err != nil {
+			return err
+		}
+		defer func() { operationErr = errorsJoin(operationErr, session.DestroyObject(derivedHandle)) }()
+		attrs, err := session.GetAttributeValue(derivedHandle, []*raw.Attribute{raw.NewAttribute(raw.CKA_VALUE, nil)})
+		if err != nil {
+			return err
+		}
+		if len(attrs) != 1 || len(attrs[0].Value) == 0 {
+			return errors.New("conformance: derived IKE key has no CKA_VALUE")
+		}
+		derivedLength = len(attrs[0].Value)
+		return nil
+	})
+	cleanupErr := r.cleanup(ctx, base)
+	if err != nil {
+		return nil, errorsJoin(err, cleanupErr)
+	}
+	return map[string]any{"secret_bytes": derivedLength}, cleanupErr
+}
+
+// testTrustObject creates and removes a PKCS #11 trust object. No token in the
+// test fleet advertises CKO_TRUST support today so the case exercises the typed
+// object path and capability-skips cleanly everywhere else
+func (r *Runner) testTrustObject(ctx context.Context, _ Case) (map[string]any, error) {
+	identity := r.identity("trust")
+	err := r.withSessionOptions(ctx, pkcs11.RawSessionOptions{Operation: "conformance-trust-object", ReadWrite: true}, func(session *testSession) (operationErr error) {
+		handle, err := session.CreateObject([]*raw.Attribute{
+			raw.NewAttribute(raw.CKA_CLASS, raw.CKO_TRUST),
+			raw.NewAttribute(raw.CKA_TOKEN, true),
+			raw.NewAttribute(raw.CKA_PRIVATE, false),
+			raw.NewAttribute(raw.CKA_MODIFIABLE, true),
+			raw.NewAttribute(raw.CKA_LABEL, identity),
+			raw.NewAttribute(raw.CKA_ISSUER, []byte("otpki-conformance-issuer")),
+			raw.NewAttribute(raw.CKA_SERIAL_NUMBER, []byte{0x01}),
+			raw.NewAttribute(raw.CKA_HASH_OF_CERTIFICATE, testMessage(20)),
+			raw.NewAttribute(raw.CKA_TRUST_SERVER_AUTH, raw.CKT_TRUST_ANCHOR),
+			raw.NewAttribute(raw.CKA_TRUST_CLIENT_AUTH, raw.CKT_NOT_TRUSTED),
+		})
+		if err != nil {
+			return fmt.Errorf("conformance: trust objects are not supported: %w", err)
+		}
+		defer func() { operationErr = errorsJoin(operationErr, session.DestroyObject(handle)) }()
+		attrs, err := session.GetAttributeValue(handle, []*raw.Attribute{raw.NewAttribute(raw.CKA_TRUST_SERVER_AUTH, nil)})
+		if err != nil {
+			return err
+		}
+		if len(attrs) != 1 {
+			return errors.New("conformance: trust object did not retain CKA_TRUST_SERVER_AUTH")
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"created": true}, nil
+}
+
+// testValidationObject creates and removes a PKCS #11 3.2 validation object.
+// No token in the test fleet supports CKO_VALIDATION today
+func (r *Runner) testValidationObject(ctx context.Context, _ Case) (map[string]any, error) {
+	if err := r.requireInterface(raw.Version{Major: 3, Minor: 2}); err != nil {
+		return nil, err
+	}
+	identity := r.identity("validation")
+	err := r.withSessionOptions(ctx, pkcs11.RawSessionOptions{Operation: "conformance-validation-object", ReadWrite: true}, func(session *testSession) (operationErr error) {
+		handle, err := session.CreateObject([]*raw.Attribute{
+			raw.NewAttribute(raw.CKA_CLASS, raw.CKO_VALIDATION),
+			raw.NewAttribute(raw.CKA_TOKEN, true),
+			raw.NewAttribute(raw.CKA_PRIVATE, false),
+			raw.NewAttribute(raw.CKA_MODIFIABLE, true),
+			raw.NewAttribute(raw.CKA_LABEL, identity),
+			raw.NewAttribute(raw.CKA_VALIDATION_TYPE, raw.CKV_TYPE_SOFTWARE),
+			raw.NewAttribute(raw.CKA_VALIDATION_VERSION, []byte{3, 2}),
+			raw.NewAttribute(raw.CKA_VALIDATION_LEVEL, uint(0)),
+			raw.NewAttribute(raw.CKA_VALIDATION_AUTHORITY_TYPE, raw.CKV_AUTHORITY_TYPE_NIST_CMVP),
+			raw.NewAttribute(raw.CKA_VALIDATION_MODULE_ID, []byte("otpki-conformance")),
+		})
+		if err != nil {
+			return fmt.Errorf("conformance: validation objects are not supported: %w", err)
+		}
+		defer func() { operationErr = errorsJoin(operationErr, session.DestroyObject(handle)) }()
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"created": true}, nil
+}
+
+// testMessageAEAD exercises the PKCS #11 3.0 single-shot message encryption and
+// decryption functions with an AEAD mechanism, including the tag the provider
+// writes back through the message parameter
+func (r *Runner) testMessageAEAD(ctx context.Context, testCase Case) (map[string]any, error) {
+	if err := r.requireInterface(raw.Version{Major: 3, Minor: 0}); err != nil {
+		return nil, err
+	}
+	variant := strings.ToLower(strings.TrimSpace(testCase.Variant))
+	if variant == "" {
+		variant = "chacha20-poly1305"
+	}
+	var mechanism uint
+	keyCase := testCase
+	switch variant {
+	case "chacha20-poly1305":
+		mechanism = raw.CKM_CHACHA20_POLY1305
+		if keyCase.Algorithm == "" {
+			keyCase.Algorithm = pkcs11.AlgorithmChaCha20
+		}
+	case "gcm":
+		mechanism = raw.CKM_AES_GCM
+		if keyCase.Algorithm == "" {
+			keyCase.Algorithm = pkcs11.AlgorithmAES256
+		}
+	default:
+		return nil, fmt.Errorf("conformance: unknown message-aead variant %q", testCase.Variant)
+	}
+	if err := r.requireAdvertisedMechanism(mechanism, raw.CKF_MESSAGE_ENCRYPT|raw.CKF_MESSAGE_DECRYPT); err != nil {
+		return nil, err
+	}
+	key, err := r.client.GenerateSecretKey(ctx, r.secretKeyOptions(keyCase))
+	if err != nil {
+		return nil, err
+	}
+	nonce := bytes.Repeat([]byte{0x77}, 12)
+	aad := []byte("otpki-conformance-message-aad")
+	plaintext := testMessage(testCase.MessageBytes)
+	var ciphertext, tag, recovered []byte
+	err = r.withSessionOptions(ctx, pkcs11.RawSessionOptions{Operation: "conformance-message-aead", ReadWrite: true}, func(session *testSession) error {
+		handle, err := findObjectHandle(session, key)
+		if err != nil {
+			return err
+		}
+		// Message operations take the AEAD parameter per message, not at init.
+		// The tag lands in the parameter struct when the call returns.
+		var encryptParameter, decryptParameter any
+		var encryptParams *raw.ChaCha20Poly1305MsgParams
+		var encryptGCMParams *raw.GCMMessageParams
+		switch variant {
+		case "chacha20-poly1305":
+			encryptParams = &raw.ChaCha20Poly1305MsgParams{Nonce: nonce}
+			encryptParameter = encryptParams
+		default:
+			encryptGCMParams = &raw.GCMMessageParams{IV: nonce, IVGenerator: raw.CKG_NO_GENERATE, TagBits: 128}
+			encryptParameter = encryptGCMParams
+		}
+		if err := session.MessageEncryptInit([]*raw.Mechanism{raw.NewMechanism(mechanism, nil)}, handle); err != nil {
+			return err
+		}
+		if ciphertext, err = session.EncryptMessage(encryptParameter, aad, plaintext); err != nil {
+			_ = session.MessageEncryptFinal() // release the active operation so the pooled session stays usable
+			return err
+		}
+		if err := session.MessageEncryptFinal(); err != nil {
+			return fmt.Errorf("conformance: message encrypt final: %w", err)
+		}
+		switch variant {
+		case "chacha20-poly1305":
+			tag = slices.Clone(encryptParams.Tag)
+			decryptParameter = &raw.ChaCha20Poly1305MsgParams{Nonce: nonce, Tag: tag}
+		default:
+			tag = slices.Clone(encryptGCMParams.Tag)
+			decryptParameter = &raw.GCMMessageParams{IV: nonce, IVGenerator: raw.CKG_NO_GENERATE, Tag: tag, TagBits: 128}
+		}
+		if err := session.MessageDecryptInit([]*raw.Mechanism{raw.NewMechanism(mechanism, nil)}, handle); err != nil {
+			return err
+		}
+		if recovered, err = session.DecryptMessage(decryptParameter, aad, ciphertext); err != nil {
+			_ = session.MessageDecryptFinal()
+			return err
+		}
+		return session.MessageDecryptFinal()
+	})
+	cleanupErr := r.cleanup(ctx, key)
+	if err != nil {
+		return nil, errorsJoin(err, cleanupErr)
+	}
+	if len(tag) != 16 {
+		return nil, errorsJoin(fmt.Errorf("conformance: message tag has %d bytes, want 16", len(tag)), cleanupErr)
+	}
+	if !bytes.Equal(recovered, plaintext) {
+		return nil, errorsJoin(errors.New("conformance: message decrypt output differs from input"), cleanupErr)
+	}
+	return map[string]any{"variant": variant, "ciphertext_bytes": len(ciphertext), "tag_bytes": len(tag)}, cleanupErr
+}
+
 func (r *Runner) testImportSecret(ctx context.Context, testCase Case) (map[string]any, error) {
 	algorithm := testCase.Algorithm
 	if algorithm == "" {
@@ -838,6 +1347,17 @@ func (r *Runner) requireMechanismFlags(route pkcs11.Route, required uint) error 
 	}
 	return fmt.Errorf("conformance: mechanism 0x%x lacks required message flags 0x%x: %w",
 		route.Mechanism.Mechanism, required, raw.Error(raw.CKR_FUNCTION_NOT_SUPPORTED))
+}
+
+// requireAdvertisedMechanism reports a capability gap when the token does not
+// advertise the mechanism with all of the required operation flags
+func (r *Runner) requireAdvertisedMechanism(mechanism, flags uint) error {
+	info, ok := r.client.Device().Fingerprint.Mechanisms[raw.MechanismType(mechanism)]
+	if !ok || info.Flags&flags != flags {
+		return fmt.Errorf("conformance: mechanism 0x%x is not advertised with flags 0x%x: %w",
+			mechanism, flags, raw.Error(raw.CKR_MECHANISM_INVALID))
+	}
+	return nil
 }
 
 // probeParameterizedMechanism reports a capability gap when a resolved
@@ -1422,6 +1942,11 @@ func verifyWithGo(public crypto.PublicKey, algorithm pkcs11.Algorithm, hash cryp
 			return true, errors.New("ECDSA signature is invalid")
 		}
 		return true, nil
+	case *dsa.PublicKey:
+		if !dsaVerifyASN1(key, input, signature) {
+			return true, errors.New("DSA signature is invalid")
+		}
+		return true, nil
 	case ed25519.PublicKey:
 		if algorithm != pkcs11.AlgorithmEd25519 || hash != 0 {
 			return false, nil
@@ -1506,7 +2031,7 @@ func testMessage(length int) []byte {
 
 func isSecretAlgorithm(algorithm pkcs11.Algorithm) bool {
 	switch algorithm {
-	case pkcs11.AlgorithmAES128, pkcs11.AlgorithmAES192, pkcs11.AlgorithmAES256,
+	case pkcs11.AlgorithmAES128, pkcs11.AlgorithmAES192, pkcs11.AlgorithmAES256, pkcs11.AlgorithmChaCha20,
 		pkcs11.AlgorithmHMACSHA256, pkcs11.AlgorithmHMACSHA384, pkcs11.AlgorithmHMACSHA512:
 		return true
 	default:

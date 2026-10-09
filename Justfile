@@ -53,6 +53,7 @@ gen:
 
 tidy:
     go mod tidy
+    cd conformance/testcontainers && go mod tidy
 
 test:
     go test ./...

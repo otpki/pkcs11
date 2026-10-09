@@ -33,10 +33,14 @@ func HostNativeABI() NativeABI {
 
 // NativePointer is a relocation in a native mechanism parameter. Offset is the
 // location of a native pointer in Root. Data is copied into a separate
-// backend-owned block and its stable address is written at Offset.
+// backend-owned block and its stable address is written at Offset. When Layout
+// is non-nil the nested layout is marshaled into the same arena instead and
+// its root address is written at Offset, allowing pointer-containing child
+// structures such as arrays of parameter records.
 type NativePointer struct {
 	Offset int
 	Data   []byte
+	Layout *NativeParameterLayout
 }
 
 // NativeParameterLayout is a pointer-safe description of a native C struct.
@@ -119,6 +123,31 @@ func (b *NativeStructBuilder) AddPointer(data []byte) {
 	b.root = append(b.root, make([]byte, b.abi.PointerSize)...)
 	if len(data) != 0 {
 		b.pointers = append(b.pointers, NativePointer{Offset: offset, Data: slices.Clone(data)})
+	}
+}
+
+// AddNested writes a pointer to a nested layout, for example an array of
+// structures that itself carries pointer relocations. The child layout is
+// marshaled into the same arena when the parent is realized. A nil layout
+// writes a NULL pointer.
+func (b *NativeStructBuilder) AddNested(layout *NativeParameterLayout) {
+	b.align(b.abi.PointerSize)
+	offset := len(b.root)
+	b.root = append(b.root, make([]byte, b.abi.PointerSize)...)
+	if layout != nil && len(layout.Root) != 0 {
+		b.pointers = append(b.pointers, NativePointer{Offset: offset, Layout: layout})
+	}
+}
+
+// AddAddress writes a pointer whose target already lives in the same native
+// arena, such as a nested structure marshaled by an earlier Layout call. Unlike
+// AddPointer it records no relocation because the address is already stable.
+func (b *NativeStructBuilder) AddAddress(pointer uintptr) {
+	b.align(b.abi.PointerSize)
+	offset := len(b.root)
+	b.root = append(b.root, make([]byte, b.abi.PointerSize)...)
+	if pointer != 0 {
+		b.abi.putPointer(b.root, offset, pointer)
 	}
 }
 

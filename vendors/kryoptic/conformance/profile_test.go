@@ -15,8 +15,8 @@ func TestProfile(t *testing.T) {
 	if err := profile.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if len(profile.Cases) != 119 {
-		t.Fatalf("cases = %d, want 119", len(profile.Cases))
+	if len(profile.Cases) != 202 {
+		t.Fatalf("cases = %d, want 202", len(profile.Cases))
 	}
 }
 

@@ -336,6 +336,17 @@ func inferAlgorithm(device Device, keyType uint, attributes []*raw.Attribute) Al
 		case "1.3.101.113", "ed448", "edwards448":
 			return AlgorithmEd448
 		}
+	case raw.CKK_EC_MONTGOMERY:
+		switch curveIdentifier(ecParameters) {
+		case "1.3.101.110", "x25519", "curve25519":
+			return AlgorithmX25519
+		case "1.3.101.111", "x448", "curve448":
+			return AlgorithmX448
+		}
+	case raw.CKK_DSA:
+		return AlgorithmDSA
+	case raw.CKK_DH:
+		return AlgorithmDH
 	case raw.CKK_HSS:
 		return AlgorithmHSS
 	case raw.CKK_XMSS:
@@ -351,6 +362,8 @@ func inferAlgorithm(device Device, keyType uint, attributes []*raw.Attribute) Al
 		case 32:
 			return AlgorithmAES256
 		}
+	case raw.CKK_CHACHA20:
+		return AlgorithmChaCha20
 	case raw.CKK_SHA256_HMAC:
 		return AlgorithmHMACSHA256
 	case raw.CKK_SHA384_HMAC:

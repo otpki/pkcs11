@@ -1,6 +1,7 @@
 package pkcs11
 
 import (
+	"bytes"
 	"crypto"
 	"encoding/asn1"
 	"testing"
@@ -340,5 +341,89 @@ func TestInferAlgorithmFromStandardAttributes(t *testing.T) {
 				t.Fatalf("inferAlgorithm() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestResolveChaCha20KeyGen(t *testing.T) {
+	device := testDevice(adapterDefinition{name: "generic"}, map[raw.MechanismType]raw.MechanismInfo{
+		raw.MechanismType(raw.CKM_CHACHA20_KEY_GEN): {Flags: raw.CKF_GENERATE},
+	})
+	route, err := ResolveRoute(device, Intent{Operation: OperationGenerate, Algorithm: AlgorithmChaCha20})
+	if err != nil {
+		t.Fatalf("ResolveRoute: %v", err)
+	}
+	if route.Mechanism == nil || route.Mechanism.Mechanism != raw.CKM_CHACHA20_KEY_GEN {
+		t.Fatalf("mechanism = %#v, want CKM_CHACHA20_KEY_GEN", route.Mechanism)
+	}
+	if route.KeyType != raw.CKK_CHACHA20 {
+		t.Fatalf("key type = %#x, want CKK_CHACHA20", route.KeyType)
+	}
+}
+
+func TestResolveChaCha20Poly1305Default(t *testing.T) {
+	device := testDevice(adapterDefinition{name: "generic"}, map[raw.MechanismType]raw.MechanismInfo{
+		raw.MechanismType(raw.CKM_CHACHA20_POLY1305): {Flags: raw.CKF_ENCRYPT},
+		raw.MechanismType(raw.CKM_CHACHA20):          {Flags: raw.CKF_ENCRYPT},
+	})
+	route, err := ResolveRoute(device, Intent{
+		Operation: OperationEncrypt,
+		Algorithm: AlgorithmChaCha20,
+		IV:        make([]byte, 12),
+		AAD:       []byte("aad"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveRoute: %v", err)
+	}
+	if route.Mechanism.Mechanism != raw.CKM_CHACHA20_POLY1305 {
+		t.Fatalf("mechanism = %#x, want CKM_CHACHA20_POLY1305", route.Mechanism.Mechanism)
+	}
+	parameters, ok := route.Mechanism.Parameter.(raw.ChaCha20Poly1305Params)
+	if !ok {
+		t.Fatalf("parameter type = %T, want raw.ChaCha20Poly1305Params", route.Mechanism.Parameter)
+	}
+	if len(parameters.Nonce) != 12 || string(parameters.AAD) != "aad" {
+		t.Fatalf("parameters = %#v", parameters)
+	}
+}
+
+func TestResolveChaCha20Stream(t *testing.T) {
+	device := testDevice(adapterDefinition{name: "generic"}, map[raw.MechanismType]raw.MechanismInfo{
+		raw.MechanismType(raw.CKM_CHACHA20): {Flags: raw.CKF_ENCRYPT},
+	})
+	iv := append([]byte{1, 0, 0, 0}, bytes.Repeat([]byte{0x42}, 12)...)
+	route, err := ResolveRoute(device, Intent{
+		Operation:  OperationEncrypt,
+		Algorithm:  AlgorithmChaCha20,
+		CipherMode: CipherModeChaCha20,
+		IV:         iv,
+	})
+	if err != nil {
+		t.Fatalf("ResolveRoute: %v", err)
+	}
+	if route.Mechanism.Mechanism != raw.CKM_CHACHA20 {
+		t.Fatalf("mechanism = %#x, want CKM_CHACHA20", route.Mechanism.Mechanism)
+	}
+	parameters, ok := route.Mechanism.Parameter.(raw.ChaCha20Params)
+	if !ok {
+		t.Fatalf("parameter type = %T, want raw.ChaCha20Params", route.Mechanism.Parameter)
+	}
+	if !bytes.Equal(parameters.BlockCounter, []byte{1, 0, 0, 0}) || !bytes.Equal(parameters.Nonce, iv[4:]) {
+		t.Fatalf("parameters = %#v", parameters)
+	}
+}
+
+func TestResolveChaCha20RejectsBadInput(t *testing.T) {
+	device := testDevice(adapterDefinition{name: "generic"}, map[raw.MechanismType]raw.MechanismInfo{
+		raw.MechanismType(raw.CKM_CHACHA20_POLY1305): {Flags: raw.CKF_ENCRYPT},
+		raw.MechanismType(raw.CKM_CHACHA20):          {Flags: raw.CKF_ENCRYPT},
+	})
+	if _, err := ResolveRoute(device, Intent{Operation: OperationEncrypt, Algorithm: AlgorithmChaCha20, IV: make([]byte, 8)}); err == nil {
+		t.Fatal("expected an error for an 8-byte ChaCha20-Poly1305 nonce")
+	}
+	if _, err := ResolveRoute(device, Intent{Operation: OperationEncrypt, Algorithm: AlgorithmChaCha20, CipherMode: CipherModeChaCha20, IV: make([]byte, 12)}); err == nil {
+		t.Fatal("expected an error for a 12-byte ChaCha20 IV")
+	}
+	if _, err := ResolveRoute(device, Intent{Operation: OperationEncrypt, Algorithm: AlgorithmChaCha20, IV: make([]byte, 12), TagBits: 64}); err == nil {
+		t.Fatal("expected an error for a non-128 ChaCha20-Poly1305 tag")
 	}
 }
