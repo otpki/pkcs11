@@ -226,3 +226,16 @@ func TestSourceIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestContainsDefaultPINIgnoresNumbers(t *testing.T) {
+	for _, payload := range []string{`{"checked_at":"2026-10-08T20:38:54.051234034Z"}`, `{"duration":1234}`, `{"duration":512345}`, ""} {
+		if ContainsDefaultPIN(payload) {
+			t.Errorf("ContainsDefaultPIN(%q) = true, want false", payload)
+		}
+	}
+	for _, payload := range []string{`{"pin":"1234"}`, `{"error":"login with 1234 failed"}`, `{"label":"PIN1234"}`, "login with 1234 failed"} {
+		if !ContainsDefaultPIN(payload) {
+			t.Errorf("ContainsDefaultPIN(%q) = false, want true", payload)
+		}
+	}
+}

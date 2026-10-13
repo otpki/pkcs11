@@ -48,8 +48,9 @@ func newSessionWorker() *sessionWorker {
 	return worker
 }
 
-// do starts call on the worker's pinned thread. Context cancellation can abort
-// queueing, but cannot interrupt a C function after execution has begun.
+// do runs call on the worker's pinned thread, or on the caller's goroutine for
+// a nil worker, and returns call's error. ctx bounds only the wait to enqueue,
+// and a closed worker fails at once.
 func (w *sessionWorker) do(ctx context.Context, call func() error) error {
 	if w == nil {
 		return call()

@@ -12,8 +12,8 @@ import (
 // inactive shared target.
 const AuthorizationOperationActivateTarget = "proxy.activate-target"
 
-// AuthorizationOperationListRoutes lets a target hide itself from a caller's route catalog.
-// Server.RouteCatalog remains unfiltered for operators.
+// AuthorizationOperationListRoutes lets a target hide itself from a caller's route catalog, so a
+// default-deny Authorize must allow it. Server.RouteCatalog remains unfiltered for operators.
 const AuthorizationOperationListRoutes = "proxy.list-routes"
 
 // AuthorizationRequest contains non-secret request metadata for a target-level
