@@ -89,6 +89,21 @@ abi-check:
 verify-backends:
     go test -run TestNativeBackendsRemainSeparated .
 
+# The PKCS11_MODULE-gated tests run against a scratch SoftHSM token.
+# A second run in the same process exposes order-dependent state.
+test-softhsm module=env("PKCS11_MODULE", "/usr/lib/softhsm/libsofthsm2.so"):
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir=$(mktemp -d)
+    trap 'rm -rf "$dir"' EXIT
+    mkdir "$dir/tokens"
+    printf 'directories.tokendir = %s/tokens\nobjectstore.backend = file\n' "$dir" > "$dir/softhsm2.conf"
+    export SOFTHSM2_CONF="$dir/softhsm2.conf"
+    label=ci pin=123456
+    softhsm2-util --init-token --free --label "$label" --so-pin 12345678 --pin "$pin" >/dev/null
+    PKCS11_MODULE="{{ module }}" PKCS11_TOKEN_LABEL="$label" PKCS11_PIN="$pin" \
+      go test -count=2 -run 'Integration$' . ./proxy ./proxycmd
+
 vulncheck:
     govulncheck ./...
 

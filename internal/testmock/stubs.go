@@ -26,6 +26,7 @@ func (m *Module) InitToken(slot raw.SlotID, pin []byte, label string) error {
 	if strings.TrimSpace(label) != "" {
 		t.label = label
 	}
+	t.uninitialized = false
 	t.loggedIn = false
 	for h, s := range m.sessions {
 		if s.slot == slot {
