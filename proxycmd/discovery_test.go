@@ -681,6 +681,33 @@ func TestUnknownConfigKeysFailStartup(t *testing.T) {
 	}
 }
 
+// sessionScopedLogin reports whether the module's detected vendor adapter
+// requires per-session physical login. The broker is always client-activated,
+// it never retains a PIN, so it cannot authenticate the later worker sessions
+// such vendors need and refuses their routes.
+func sessionScopedLogin(t *testing.T, modulePath string) bool {
+	t.Helper()
+	config := pkcs11.DefaultDetectionConfig()
+	config.ExplicitPaths = []string{modulePath}
+	probes, err := pkcs11.DetectModules(context.Background(), config, all.Modules()...)
+	if err != nil {
+		t.Fatalf("detect %s: %v", modulePath, err)
+	}
+	for _, probe := range probes {
+		if probe.Candidate.Path != modulePath || probe.Error != "" {
+			continue
+		}
+		for _, device := range probe.Devices {
+			for _, module := range all.Modules() {
+				if definition := module.Definition(); definition.ID == device.Adapter.Family {
+					return definition.Behavior.LoginScope == pkcs11.VendorLoginSession
+				}
+			}
+		}
+	}
+	return false
+}
+
 // TestDiscoveryIntegration runs the real broker with a discovery config
 // against the module PKCS11_MODULE names (SoftHSM in the conformance
 // fixtures): the catalog publishes one route per initialised token.
@@ -688,6 +715,9 @@ func TestDiscoveryIntegration(t *testing.T) {
 	modulePath := strings.TrimSpace(os.Getenv("PKCS11_MODULE"))
 	if modulePath == "" {
 		t.Skip("PKCS11_MODULE is not set")
+	}
+	if sessionScopedLogin(t, modulePath) {
+		t.Skip("vendor requires per-session physical login; the client-activated broker cannot serve it")
 	}
 	want, err := pkcs11.ListTokens(context.Background(), pkcs11.LocalModule(modulePath))
 	if err != nil {

@@ -89,21 +89,6 @@ abi-check:
 verify-backends:
     go test -run TestNativeBackendsRemainSeparated .
 
-# The PKCS11_MODULE-gated tests run against a scratch SoftHSM token.
-# A second run in the same process exposes order-dependent state.
-test-softhsm module=env("PKCS11_MODULE", "/usr/lib/softhsm/libsofthsm2.so"):
-    #!/usr/bin/env bash
-    set -euo pipefail
-    dir=$(mktemp -d)
-    trap 'rm -rf "$dir"' EXIT
-    mkdir "$dir/tokens"
-    printf 'directories.tokendir = %s/tokens\nobjectstore.backend = file\n' "$dir" > "$dir/softhsm2.conf"
-    export SOFTHSM2_CONF="$dir/softhsm2.conf"
-    label=ci pin=123456
-    softhsm2-util --init-token --free --label "$label" --so-pin 12345678 --pin "$pin" >/dev/null
-    PKCS11_MODULE="{{ module }}" PKCS11_TOKEN_LABEL="$label" PKCS11_PIN="$pin" \
-      go test -count=2 -run 'Integration$' . ./proxy ./proxycmd
-
 vulncheck:
     govulncheck ./...
 
@@ -138,3 +123,19 @@ docker platform="linux/arm64":
         --build-arg GIT_BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || true)" \
         --build-arg GIT_HASH="$(git rev-parse --short HEAD 2>/dev/null || true)" \
         -t pkcs11-proxy:dev .
+
+# run a provider's conformance suite in its fixture container. Builds the
+# fixture image via testcontainers (the first SoftHSM source build is slow,
+# but Docker layer cache keeps reruns fast). Pass a prebuilt image to skip the
+# build entirely, as CI does:
+#   just conformance softhsm2 otpki/conformance-softhsm2-cgo:local
+conformance provider image="":
+    cd "{{ root }}/conformance/testcontainers" && go run . -root "{{ root }}" -provider {{ provider }} {{ if image != "" { "-image " + image } else { "" } }}
+
+# build a vendor's integration image (the Dockerfile's integration target) and
+# run the PKCS11_MODULE-gated tests inside it (ex. just integration softhsm)
+integration vendor tag="local":
+    docker buildx build --load --target integration \
+        -f "{{ root }}/vendors/{{ vendor }}/conformance/docker/Dockerfile" \
+        -t otpki/integration-{{ vendor }}-cgo:{{ tag }} "{{ root }}"
+    docker run --rm otpki/integration-{{ vendor }}-cgo:{{ tag }}
