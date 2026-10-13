@@ -50,6 +50,9 @@ func Profile() base.Profile {
 			base.Case{Name: "slh-dsa-sha2-256f", Kind: "sign", Requirement: base.Required, Algorithm: pkcs11.Algorithm("slh-dsa-sha2-256f"), Variant: "direct", MessageBytes: 32},
 			base.Case{Name: "slh-dsa-shake-256f", Kind: "sign", Requirement: base.Required, Algorithm: pkcs11.Algorithm("slh-dsa-shake-256f"), Variant: "direct", MessageBytes: 32},
 			base.Case{Name: "ml-dsa-65-external-mu", Kind: "sign", Requirement: base.Optional, Algorithm: pkcs11.Algorithm("ml-dsa-65"), Variant: "external-mu", Notes: "Requires a vendor external-mu alias; external mu is not a standard PKCS #11 3.2 mechanism."},
+			base.Case{Name: "pub-key-from-priv-rsa", Kind: "pub-key-from-priv", Requirement: base.Required, Algorithm: pkcs11.Algorithm("rsa"), Variant: "rsa", RSABits: 2048},
+			base.Case{Name: "pub-key-from-priv-ecdsa", Kind: "pub-key-from-priv", Requirement: base.Disabled, Algorithm: pkcs11.Algorithm("ecdsa-p256"), Notes: "Known gap: kryoptic implements CKM_PUB_KEY_FROM_PRIV_KEY only for RSA, ML-KEM, ML-DSA, and SLH-DSA keys; EC private keys have no public-object factory path."},
+			base.Case{Name: "derive-aes-cbc-encrypt", Kind: "derive-encrypt", Requirement: base.Disabled, Variant: "aes-cbc", Notes: "Known gap: kryoptic stores the CK_AES_CBC_ENCRYPT_DATA_PARAMS IV as a borrowed slice of the stack-resident parameter copy, so C_DeriveKey reads a dangling IV; the derived value is unpredictable."},
 		),
 	}
 }

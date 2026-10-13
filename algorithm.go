@@ -29,12 +29,25 @@ const (
 	AlgorithmEd25519 Algorithm = "ed25519"
 	// AlgorithmEd448 selects Ed448 or Ed448ph according to signature options.
 	AlgorithmEd448 Algorithm = "ed448"
+	// AlgorithmDSA selects finite-field DSA over caller-supplied domain
+	// parameters. Key generation requires Intent.DomainParameters.
+	AlgorithmDSA Algorithm = "dsa"
+	// AlgorithmDH selects classic Diffie-Hellman over caller-supplied
+	// CKA_PRIME/CKA_BASE domain parameters via Intent.DomainParameters.
+	AlgorithmDH Algorithm = "dh"
+	// AlgorithmX25519 selects X25519 Montgomery key agreement keys.
+	AlgorithmX25519 Algorithm = "x25519"
+	// AlgorithmX448 selects X448 Montgomery key agreement keys.
+	AlgorithmX448 Algorithm = "x448"
 	// AlgorithmAES128 selects a 128-bit AES secret key.
 	AlgorithmAES128 Algorithm = "aes-128"
 	// AlgorithmAES192 selects a 192-bit AES secret key.
 	AlgorithmAES192 Algorithm = "aes-192"
 	// AlgorithmAES256 selects a 256-bit AES secret key.
 	AlgorithmAES256 Algorithm = "aes-256"
+	// AlgorithmChaCha20 selects a 256-bit ChaCha20 secret key. CipherMode picks
+	// the plain stream cipher or the ChaCha20-Poly1305 AEAD construction.
+	AlgorithmChaCha20 Algorithm = "chacha20"
 	// AlgorithmHMACSHA256 selects an HMAC key intended for SHA-256.
 	AlgorithmHMACSHA256 Algorithm = "hmac-sha256"
 	// AlgorithmHMACSHA384 selects an HMAC key intended for SHA-384.
@@ -149,7 +162,7 @@ const (
 	RSAPaddingRaw RSAPadding = "raw"
 )
 
-// CipherMode selects the block or AEAD mode used with an AES key.
+// CipherMode selects the block or AEAD mode used with a symmetric key.
 type CipherMode string
 
 const (
@@ -159,6 +172,30 @@ const (
 	CipherModeCBC CipherMode = "cbc"
 	// CipherModeCTR selects AES counter mode with a 128-bit counter block.
 	CipherModeCTR CipherMode = "ctr"
+	// CipherModeChaCha20Poly1305 selects the ChaCha20-Poly1305 AEAD
+	// construction. It is the default mode for AlgorithmChaCha20 and always
+	// appends a 128-bit tag to the ciphertext.
+	CipherModeChaCha20Poly1305 CipherMode = "chacha20-poly1305"
+	// CipherModeChaCha20 selects the raw ChaCha20 stream cipher. IV carries the
+	// complete 16-byte initial state: the 4-byte block counter followed by the
+	// 12-byte nonce.
+	CipherModeChaCha20 CipherMode = "chacha20"
+	// CipherModeCCM selects authenticated AES-CCM. The mechanism parameter
+	// carries Nonce, AAD, and MACLen; DataLen is filled in per operation.
+	CipherModeCCM CipherMode = "ccm"
+	// CipherModeCTS selects AES ciphertext stealing. IV is 16 bytes.
+	CipherModeCTS CipherMode = "cts"
+	// CipherModeOFB selects AES output-feedback mode. IV is 16 bytes.
+	CipherModeOFB CipherMode = "ofb"
+	// CipherModeCFB selects 128-bit AES cipher-feedback mode. IV is 16 bytes.
+	CipherModeCFB CipherMode = "cfb"
+	// CipherModeCFB8 selects 8-bit AES cipher-feedback mode. IV is 16 bytes.
+	CipherModeCFB8 CipherMode = "cfb8"
+	// CipherModeCFB1 selects 1-bit AES cipher-feedback mode. IV is 16 bytes.
+	CipherModeCFB1 CipherMode = "cfb1"
+	// CipherModeECB selects raw AES electronic-codebook mode. No IV is used;
+	// inputs must be a multiple of the AES block size.
+	CipherModeECB CipherMode = "ecb"
 )
 
 // Intent describes what the caller wants, independent of a vendor mechanism
@@ -201,6 +238,21 @@ type Intent struct {
 	// MechanismParameter replaces the parameter synthesized by the router. It is
 	// intended for typed raw parameters or an vendors/<vendor> parameter encoder.
 	MechanismParameter any
+	// DomainParameters carries finite-field DSA or DH domain parameters for key
+	// generation. Prime and Base map to CKA_PRIME and CKA_BASE; Subprime maps to
+	// CKA_SUBPRIME when set.
+	DomainParameters *DomainParameters
+}
+
+// DomainParameters carries finite-field domain parameters for DSA and classic
+// Diffie-Hellman. Prime, Base, and Subprime are unsigned big-endian integers.
+type DomainParameters struct {
+	// Prime is the field modulus p (CKA_PRIME).
+	Prime *big.Int
+	// Subprime is the subgroup order q (CKA_SUBPRIME); required for DSA.
+	Subprime *big.Int
+	// Base is the generator g (CKA_BASE).
+	Base *big.Int
 }
 
 // RouteReplay controls whether a VendorModule changes the root driver's normal
@@ -305,9 +357,14 @@ var algorithmSpecs = map[Algorithm]algorithmSpec{
 	AlgorithmECDSAP521:  {KeyType: raw.CKK_EC, KeyTypeAlias: "ec", KeyPair: true, KeyPairMechanism: raw.CKM_EC_KEY_PAIR_GEN, KeyPairMechanismSet: true, KeyPairAlias: "ec-key-pair-gen", ECParams: oidBytes(1, 3, 132, 0, 35), SignMechanisms: []uint{raw.CKM_ECDSA, raw.CKM_ECDSA_SHA512}},
 	AlgorithmEd25519:    {KeyType: raw.CKK_EC_EDWARDS, KeyTypeAlias: "ec-edwards", KeyPair: true, KeyPairMechanism: raw.CKM_EC_EDWARDS_KEY_PAIR_GEN, KeyPairMechanismSet: true, KeyPairAlias: "ec-edwards-key-pair-gen", ECParams: oidBytes(1, 3, 101, 112), SignMechanisms: []uint{raw.CKM_EDDSA}},
 	AlgorithmEd448:      {KeyType: raw.CKK_EC_EDWARDS, KeyTypeAlias: "ec-edwards", KeyPair: true, KeyPairMechanism: raw.CKM_EC_EDWARDS_KEY_PAIR_GEN, KeyPairMechanismSet: true, KeyPairAlias: "ec-edwards-key-pair-gen", ECParams: oidBytes(1, 3, 101, 113), SignMechanisms: []uint{raw.CKM_EDDSA}},
-	AlgorithmAES128:     {KeyType: raw.CKK_AES, KeyTypeAlias: "aes", Secret: true, SecretKeyMechanism: raw.CKM_AES_KEY_GEN, SecretKeyMechanismSet: true, SecretKeyAlias: "aes-key-gen", SecretBytes: 16, EncryptionMechanisms: []uint{raw.CKM_AES_GCM, raw.CKM_AES_CBC_PAD, raw.CKM_AES_CTR}},
-	AlgorithmAES192:     {KeyType: raw.CKK_AES, KeyTypeAlias: "aes", Secret: true, SecretKeyMechanism: raw.CKM_AES_KEY_GEN, SecretKeyMechanismSet: true, SecretKeyAlias: "aes-key-gen", SecretBytes: 24, EncryptionMechanisms: []uint{raw.CKM_AES_GCM, raw.CKM_AES_CBC_PAD, raw.CKM_AES_CTR}},
-	AlgorithmAES256:     {KeyType: raw.CKK_AES, KeyTypeAlias: "aes", Secret: true, SecretKeyMechanism: raw.CKM_AES_KEY_GEN, SecretKeyMechanismSet: true, SecretKeyAlias: "aes-key-gen", SecretBytes: 32, EncryptionMechanisms: []uint{raw.CKM_AES_GCM, raw.CKM_AES_CBC_PAD, raw.CKM_AES_CTR}},
+	AlgorithmDSA:        {KeyType: raw.CKK_DSA, KeyTypeAlias: "dsa", KeyPair: true, KeyPairMechanism: raw.CKM_DSA_KEY_PAIR_GEN, KeyPairMechanismSet: true, KeyPairAlias: "dsa-key-pair-gen", SignMechanisms: []uint{raw.CKM_DSA, raw.CKM_DSA_SHA256}},
+	AlgorithmDH:         {KeyType: raw.CKK_DH, KeyTypeAlias: "dh", KeyPair: true, KeyPairMechanism: raw.CKM_DH_PKCS_KEY_PAIR_GEN, KeyPairMechanismSet: true, KeyPairAlias: "dh-pkcs-key-pair-gen", DeriveMechanisms: []uint{raw.CKM_DH_PKCS_DERIVE}},
+	AlgorithmX25519:     {KeyType: raw.CKK_EC_MONTGOMERY, KeyTypeAlias: "ec-montgomery", KeyPair: true, KeyPairMechanism: raw.CKM_EC_MONTGOMERY_KEY_PAIR_GEN, KeyPairMechanismSet: true, KeyPairAlias: "ec-montgomery-key-pair-gen", ECParams: oidBytes(1, 3, 101, 110), DeriveMechanisms: []uint{raw.CKM_ECDH1_DERIVE}},
+	AlgorithmX448:       {KeyType: raw.CKK_EC_MONTGOMERY, KeyTypeAlias: "ec-montgomery", KeyPair: true, KeyPairMechanism: raw.CKM_EC_MONTGOMERY_KEY_PAIR_GEN, KeyPairMechanismSet: true, KeyPairAlias: "ec-montgomery-key-pair-gen", ECParams: oidBytes(1, 3, 101, 111), DeriveMechanisms: []uint{raw.CKM_ECDH1_DERIVE}},
+	AlgorithmAES128:     {KeyType: raw.CKK_AES, KeyTypeAlias: "aes", Secret: true, SecretKeyMechanism: raw.CKM_AES_KEY_GEN, SecretKeyMechanismSet: true, SecretKeyAlias: "aes-key-gen", SecretBytes: 16, SignMechanisms: []uint{raw.CKM_AES_CMAC}, EncryptionMechanisms: []uint{raw.CKM_AES_GCM, raw.CKM_AES_CBC_PAD, raw.CKM_AES_CTR, raw.CKM_AES_CCM, raw.CKM_AES_CTS, raw.CKM_AES_OFB, raw.CKM_AES_CFB128}},
+	AlgorithmAES192:     {KeyType: raw.CKK_AES, KeyTypeAlias: "aes", Secret: true, SecretKeyMechanism: raw.CKM_AES_KEY_GEN, SecretKeyMechanismSet: true, SecretKeyAlias: "aes-key-gen", SecretBytes: 24, SignMechanisms: []uint{raw.CKM_AES_CMAC}, EncryptionMechanisms: []uint{raw.CKM_AES_GCM, raw.CKM_AES_CBC_PAD, raw.CKM_AES_CTR, raw.CKM_AES_CCM, raw.CKM_AES_CTS, raw.CKM_AES_OFB, raw.CKM_AES_CFB128}},
+	AlgorithmAES256:     {KeyType: raw.CKK_AES, KeyTypeAlias: "aes", Secret: true, SecretKeyMechanism: raw.CKM_AES_KEY_GEN, SecretKeyMechanismSet: true, SecretKeyAlias: "aes-key-gen", SecretBytes: 32, SignMechanisms: []uint{raw.CKM_AES_CMAC}, EncryptionMechanisms: []uint{raw.CKM_AES_GCM, raw.CKM_AES_CBC_PAD, raw.CKM_AES_CTR, raw.CKM_AES_CCM, raw.CKM_AES_CTS, raw.CKM_AES_OFB, raw.CKM_AES_CFB128}},
+	AlgorithmChaCha20:   {KeyType: raw.CKK_CHACHA20, KeyTypeAlias: "chacha20", Secret: true, SecretKeyMechanism: raw.CKM_CHACHA20_KEY_GEN, SecretKeyMechanismSet: true, SecretKeyAlias: "chacha20-key-gen", SecretBytes: 32, EncryptionMechanisms: []uint{raw.CKM_CHACHA20_POLY1305, raw.CKM_CHACHA20}},
 	AlgorithmHMACSHA256: {KeyType: raw.CKK_GENERIC_SECRET, KeyTypeAlias: "generic-secret", Secret: true, SecretKeyMechanism: raw.CKM_GENERIC_SECRET_KEY_GEN, SecretKeyMechanismSet: true, SecretKeyAlias: "generic-secret-key-gen", SecretBytes: 32, SignMechanisms: []uint{raw.CKM_SHA256_HMAC}},
 	AlgorithmHMACSHA384: {KeyType: raw.CKK_GENERIC_SECRET, KeyTypeAlias: "generic-secret", Secret: true, SecretKeyMechanism: raw.CKM_GENERIC_SECRET_KEY_GEN, SecretKeyMechanismSet: true, SecretKeyAlias: "generic-secret-key-gen", SecretBytes: 48, SignMechanisms: []uint{raw.CKM_SHA384_HMAC}},
 	AlgorithmHMACSHA512: {KeyType: raw.CKK_GENERIC_SECRET, KeyTypeAlias: "generic-secret", Secret: true, SecretKeyMechanism: raw.CKM_GENERIC_SECRET_KEY_GEN, SecretKeyMechanismSet: true, SecretKeyAlias: "generic-secret-key-gen", SecretBytes: 64, SignMechanisms: []uint{raw.CKM_SHA512_HMAC}},
@@ -544,6 +601,8 @@ func digestMechanism(hash crypto.Hash) (uint, error) {
 		hash = crypto.SHA256
 	}
 	switch hash {
+	case crypto.MD5:
+		return raw.CKM_MD5, nil
 	case crypto.SHA1:
 		return raw.CKM_SHA_1, nil
 	case crypto.SHA224:
@@ -640,8 +699,47 @@ func ecdsaMechanism(algorithm Algorithm, hash crypto.Hash, prehashed bool) (uint
 		return raw.CKM_ECDSA_SHA384, nil
 	case crypto.SHA512:
 		return raw.CKM_ECDSA_SHA512, nil
+	case crypto.SHA3_224:
+		return raw.CKM_ECDSA_SHA3_224, nil
+	case crypto.SHA3_256:
+		return raw.CKM_ECDSA_SHA3_256, nil
+	case crypto.SHA3_384:
+		return raw.CKM_ECDSA_SHA3_384, nil
+	case crypto.SHA3_512:
+		return raw.CKM_ECDSA_SHA3_512, nil
 	default:
 		return 0, fmt.Errorf("pkcs11: unsupported ECDSA hash %v for %s", hash, algorithm)
+	}
+}
+
+// dsaMechanism maps a requested hash onto the matching CKM_DSA_* combined
+// mechanism. A zero hash or a prehashed request selects raw CKM_DSA, which
+// expects the caller to supply the digest truncated to the subprime length.
+func dsaMechanism(hash crypto.Hash, prehashed bool) (uint, error) {
+	if prehashed || hash == 0 {
+		return raw.CKM_DSA, nil
+	}
+	switch hash {
+	case crypto.SHA1:
+		return raw.CKM_DSA_SHA1, nil
+	case crypto.SHA224:
+		return raw.CKM_DSA_SHA224, nil
+	case crypto.SHA256:
+		return raw.CKM_DSA_SHA256, nil
+	case crypto.SHA384:
+		return raw.CKM_DSA_SHA384, nil
+	case crypto.SHA512:
+		return raw.CKM_DSA_SHA512, nil
+	case crypto.SHA3_224:
+		return raw.CKM_DSA_SHA3_224, nil
+	case crypto.SHA3_256:
+		return raw.CKM_DSA_SHA3_256, nil
+	case crypto.SHA3_384:
+		return raw.CKM_DSA_SHA3_384, nil
+	case crypto.SHA3_512:
+		return raw.CKM_DSA_SHA3_512, nil
+	default:
+		return 0, fmt.Errorf("pkcs11: unsupported DSA hash %v", hash)
 	}
 }
 
@@ -759,6 +857,13 @@ func ResolveRoute(device Device, intent Intent) (Route, error) {
 				return Route{}, err
 			}
 			alias = "ecdsa"
+		case AlgorithmDSA:
+			var err error
+			standard, err = dsaMechanism(intent.Hash, intent.Prehashed)
+			if err != nil {
+				return Route{}, err
+			}
+			alias = "dsa"
 		case AlgorithmEd25519:
 			standard, alias = raw.CKM_EDDSA, "eddsa"
 			if intent.Prehashed || len(intent.Context) != 0 {
@@ -884,6 +989,26 @@ func ResolveRoute(device Device, intent Intent) (Route, error) {
 			default:
 				return Route{}, fmt.Errorf("pkcs11: unsupported RSA encryption padding %q", padding)
 			}
+		case intent.Algorithm == AlgorithmChaCha20:
+			switch intent.CipherMode {
+			case "", CipherModeChaCha20Poly1305:
+				if len(intent.IV) != 12 {
+					return Route{}, errors.New("pkcs11: ChaCha20-Poly1305 requires a 12-byte nonce in IV")
+				}
+				if intent.TagBits != 0 && intent.TagBits != 128 {
+					return Route{}, errors.New("pkcs11: ChaCha20-Poly1305 fixes the tag at 128 bits")
+				}
+				standard, alias = raw.CKM_CHACHA20_POLY1305, "chacha20-poly1305"
+				parameter = raw.ChaCha20Poly1305Params{Nonce: intent.IV, AAD: intent.AAD}
+			case CipherModeChaCha20:
+				if len(intent.IV) != 16 {
+					return Route{}, errors.New("pkcs11: ChaCha20 IV must be the 16-byte block counter and nonce")
+				}
+				standard, alias = raw.CKM_CHACHA20, "chacha20"
+				parameter = raw.ChaCha20Params{BlockCounter: intent.IV[:4], Nonce: intent.IV[4:]}
+			default:
+				return Route{}, fmt.Errorf("pkcs11: unsupported ChaCha20 cipher mode %q", intent.CipherMode)
+			}
 		case strings.HasPrefix(string(intent.Algorithm), "aes-"):
 			switch intent.CipherMode {
 			case "", CipherModeGCM:
@@ -900,6 +1025,30 @@ func ResolveRoute(device Device, intent Intent) (Route, error) {
 				copy(counter[:], intent.IV)
 				standard, alias = raw.CKM_AES_CTR, "aes-ctr"
 				parameter = raw.AESCTRParams{CounterBits: 128, Counter: counter}
+			case CipherModeCTS:
+				standard, alias = raw.CKM_AES_CTS, "aes-cts"
+				parameter = intent.IV
+			case CipherModeOFB:
+				standard, alias = raw.CKM_AES_OFB, "aes-ofb"
+				parameter = intent.IV
+			case CipherModeCFB:
+				standard, alias = raw.CKM_AES_CFB128, "aes-cfb128"
+				parameter = intent.IV
+			case CipherModeCFB8:
+				standard, alias = raw.CKM_AES_CFB8, "aes-cfb8"
+				parameter = intent.IV
+			case CipherModeCFB1:
+				standard, alias = raw.CKM_AES_CFB1, "aes-cfb1"
+				parameter = intent.IV
+			case CipherModeECB:
+				standard, alias = raw.CKM_AES_ECB, "aes-ecb"
+			case CipherModeCCM:
+				macLen := intent.TagBits / 8
+				if macLen == 0 {
+					macLen = 16
+				}
+				standard, alias = raw.CKM_AES_CCM, "aes-ccm"
+				parameter = raw.CCMParams{Nonce: intent.IV, AAD: intent.AAD, MACLen: macLen}
 			}
 		default:
 			return Route{}, fmt.Errorf("pkcs11: encryption routing not defined for %s", intent.Algorithm)
@@ -974,6 +1123,17 @@ func (r *Route) buildTemplates(spec algorithmSpec) {
 		r.PrivateTemplate = []*raw.Attribute{raw.NewAttribute(raw.CKA_CLASS, raw.CKO_PRIVATE_KEY), raw.NewAttribute(raw.CKA_KEY_TYPE, r.KeyType)}
 		if len(spec.ECParams) > 0 {
 			r.PublicTemplate = append(r.PublicTemplate, raw.NewAttribute(raw.CKA_EC_PARAMS, spec.ECParams))
+		}
+		if domain := r.Intent.DomainParameters; domain != nil {
+			if domain.Prime != nil {
+				r.PublicTemplate = append(r.PublicTemplate, raw.NewAttribute(raw.CKA_PRIME, domain.Prime))
+			}
+			if domain.Subprime != nil {
+				r.PublicTemplate = append(r.PublicTemplate, raw.NewAttribute(raw.CKA_SUBPRIME, domain.Subprime))
+			}
+			if domain.Base != nil {
+				r.PublicTemplate = append(r.PublicTemplate, raw.NewAttribute(raw.CKA_BASE, domain.Base))
+			}
 		}
 		if r.ParameterSet != 0 && !r.OmitParameterSetAttribute {
 			r.PublicTemplate = append(r.PublicTemplate, raw.NewAttribute(raw.CKA_PARAMETER_SET, r.ParameterSet))

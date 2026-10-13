@@ -16,8 +16,19 @@ type testSession struct {
 	handle raw.SessionHandle
 }
 
+// cancelAllOperationFlags selects every operation class for C_SessionCancel.
+const cancelAllOperationFlags = raw.CKF_FIND_OBJECTS | raw.CKF_MESSAGE_ENCRYPT |
+	raw.CKF_MESSAGE_DECRYPT | raw.CKF_MESSAGE_SIGN | raw.CKF_MESSAGE_VERIFY |
+	raw.CKF_ENCRYPT | raw.CKF_DECRYPT | raw.CKF_DIGEST | raw.CKF_SIGN |
+	raw.CKF_SIGN_RECOVER | raw.CKF_VERIFY | raw.CKF_VERIFY_RECOVER
+
 func (r *Runner) withSessionOptions(ctx context.Context, options pkcs11.RawSessionOptions, fn func(*testSession) error) error {
 	return r.client.WithRawSession(ctx, options, func(module raw.Module, handle raw.SessionHandle) error {
+		// Cases that intentionally fail operations can leave the token's
+		// operation state active; cancel it before the session returns to the
+		// pool so a later case does not inherit a poisoned slot. Providers
+		// without C_SessionCancel return an error that is safe to ignore.
+		defer func() { _ = module.SessionCancel(handle, cancelAllOperationFlags) }()
 		return fn(&testSession{module: module, handle: handle})
 	})
 }
@@ -58,6 +69,10 @@ func (s *testSession) GetAttributeValue(object raw.ObjectHandle, attributes []*r
 
 func (s *testSession) FindAllObjects(attributes []*raw.Attribute, batchSize int) ([]raw.ObjectHandle, error) {
 	return s.module.FindAllObjects(s.handle, attributes, batchSize)
+}
+
+func (s *testSession) GenerateKey(mechanisms []*raw.Mechanism, attributes []*raw.Attribute) (raw.ObjectHandle, error) {
+	return s.module.GenerateKey(s.handle, mechanisms, attributes)
 }
 
 func (s *testSession) GenerateKeyPair(mechanisms []*raw.Mechanism, publicAttributes, privateAttributes []*raw.Attribute) (raw.ObjectHandle, raw.ObjectHandle, error) {
@@ -104,8 +119,24 @@ func (s *testSession) Verify(data, signature []byte) error {
 	return s.module.Verify(s.handle, data, signature)
 }
 
+func (s *testSession) SignFinal() ([]byte, error) {
+	return s.module.SignFinal(s.handle)
+}
+
+func (s *testSession) VerifyFinal(signature []byte) error {
+	return s.module.VerifyFinal(s.handle, signature)
+}
+
 func (s *testSession) DeriveKey(mechanisms []*raw.Mechanism, baseKey raw.ObjectHandle, attributes []*raw.Attribute) (raw.ObjectHandle, error) {
 	return s.module.DeriveKey(s.handle, mechanisms, baseKey, attributes)
+}
+
+func (s *testSession) WrapKey(mechanisms []*raw.Mechanism, wrappingKey, key raw.ObjectHandle) ([]byte, error) {
+	return s.module.WrapKey(s.handle, mechanisms, wrappingKey, key)
+}
+
+func (s *testSession) UnwrapKey(mechanisms []*raw.Mechanism, unwrappingKey raw.ObjectHandle, wrapped []byte, attributes []*raw.Attribute) (raw.ObjectHandle, error) {
+	return s.module.UnwrapKey(s.handle, mechanisms, unwrappingKey, wrapped, attributes)
 }
 
 func (s *testSession) MessageSignInit(mechanisms []*raw.Mechanism, key raw.ObjectHandle) error {
@@ -114,6 +145,30 @@ func (s *testSession) MessageSignInit(mechanisms []*raw.Mechanism, key raw.Objec
 
 func (s *testSession) SignMessage(parameter any, data []byte) ([]byte, error) {
 	return s.module.SignMessage(s.handle, parameter, data)
+}
+
+func (s *testSession) MessageEncryptInit(mechanisms []*raw.Mechanism, key raw.ObjectHandle) error {
+	return s.module.MessageEncryptInit(s.handle, mechanisms, key)
+}
+
+func (s *testSession) EncryptMessage(parameter any, associatedData, plaintext []byte) ([]byte, error) {
+	return s.module.EncryptMessage(s.handle, parameter, associatedData, plaintext)
+}
+
+func (s *testSession) MessageEncryptFinal() error {
+	return s.module.MessageEncryptFinal(s.handle)
+}
+
+func (s *testSession) MessageDecryptInit(mechanisms []*raw.Mechanism, key raw.ObjectHandle) error {
+	return s.module.MessageDecryptInit(s.handle, mechanisms, key)
+}
+
+func (s *testSession) DecryptMessage(parameter any, associatedData, ciphertext []byte) ([]byte, error) {
+	return s.module.DecryptMessage(s.handle, parameter, associatedData, ciphertext)
+}
+
+func (s *testSession) MessageDecryptFinal() error {
+	return s.module.MessageDecryptFinal(s.handle)
 }
 
 func (s *testSession) MessageVerifyInit(mechanisms []*raw.Mechanism, key raw.ObjectHandle) error {

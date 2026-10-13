@@ -20,8 +20,8 @@ func TestProfile(t *testing.T) {
 	if err := profile.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if len(profile.Cases) != 109 {
-		t.Fatalf("cases = %d, want 109", len(profile.Cases))
+	if len(profile.Cases) != 192 {
+		t.Fatalf("cases = %d, want 192", len(profile.Cases))
 	}
 	knownDisabled := map[string]bool{
 		"lms": true, "hss": true, "xmss": true, "xmssmt": true, "idle-session-recovery": true,
