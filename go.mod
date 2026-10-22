@@ -3,7 +3,7 @@ module github.com/otpki/pkcs11
 go 1.27
 
 require (
-	github.com/ebitengine/purego v0.11.1
+	github.com/ebitengine/purego v0.11.2
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/spf13/cobra v1.10.2
