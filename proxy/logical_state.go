@@ -516,17 +516,6 @@ func (client *logicalClient) logicalLogin(ctx context.Context, target *brokerTar
 		return raw.Error(raw.CKR_USER_ANOTHER_ALREADY_LOGGED_IN)
 	}
 
-	// Client-activated grants are tied to one physical activation generation. A
-	// control-session loss or broker-observed logout makes old grants stale without
-	// synchronously locking every logical client while another request is running.
-	client.stateMu.Lock()
-	for key, grant := range client.grants {
-		if !client.grantIsCurrent(grant) {
-			delete(client.grants, key)
-		}
-	}
-	client.stateMu.Unlock()
-
 	// Every logical client is authenticated/audited independently, including
 	// followers that wait for another pod's physical activation attempt.
 	if err := target.authenticateLogical(ctx, identity, userType, username, pin); err != nil {
@@ -541,6 +530,14 @@ func (client *logicalClient) logicalLogin(ctx context.Context, target *brokerTar
 	}
 
 	client.stateMu.Lock()
+	// PIN verification may have rotated the physical activation. Prune grants
+	// afterwards so the client that led rotation receives a new usable grant,
+	// rather than CKR_USER_ALREADY_LOGGED_IN for its obsolete generation.
+	for key, grant := range client.grants {
+		if !client.grantIsCurrent(grant) {
+			delete(client.grants, key)
+		}
+	}
 	if len(client.grants) > 0 {
 		if _, ok := client.grants[grantKey(userType, username)]; ok {
 			client.stateMu.Unlock()
@@ -588,37 +585,50 @@ func (target *brokerTarget) authenticateLogical(ctx context.Context, identity Re
 	return &RemoteError{Code: "logical_authentication_required", Message: "target has no logical authenticator"}
 }
 
-// verifySuppliedPIN checks later logins against the PIN that activated the target. Wrong PINs are
-// normally rejected in memory. If PIN rotation is enabled and enough time has passed, the caller
-// may lead one new physical activation.
+// verifySuppliedPIN checks later logins against the last PIN accepted by the HSM,
+// including while a failed rotation has left the target inactive. If rotation is
+// enabled and enough time has passed, a mismatch may lead one physical attempt.
 func (target *brokerTarget) verifySuppliedPIN(ctx context.Context, identity RequestIdentity, clientID [16]byte, pin []byte) error {
 	verifier := target.pinVerifier
 	if verifier == nil {
 		return nil
 	}
-	generation, active := target.activation.activeGeneration()
-	if !active {
-		return nil
-	}
-	armed, matched := verifier.verify(pin, generation)
+	armed, matched := verifier.verifyArmed(pin)
 	if !armed || matched {
 		return nil
 	}
 	interval := target.login.PINRotationInterval
-	if interval <= 0 || time.Since(target.activation.lastAttempt()) < interval {
+	if interval <= 0 || time.Since(target.activation.lastAttempt()) < interval || time.Now().Before(target.activation.snapshot().RetryAfter) {
+		// The cooldown can exceed the rotation interval. Do not repeat token-wide
+		// logout and cleanup while the coordinator would refuse a physical login.
 		return raw.Error(raw.CKR_PIN_INCORRECT)
 	}
 	return target.rotatePINActivation(ctx, identity, clientID, pin)
 }
 
-// rotatePINActivation logs out the control session, clears the current activation, and lets this
-// caller try one fresh physical login. The caller already holds the maintenance lock.
-func (target *brokerTarget) rotatePINActivation(ctx context.Context, identity RequestIdentity, clientID [16]byte, pin []byte) error {
+// rotatePINActivation ends the old activation and lets this caller try one fresh
+// physical login. The armed PIN survives failure. The caller already holds the
+// maintenance lock for writing, excluding ordinary requests on every client.
+func (target *brokerTarget) rotatePINActivation(ctx context.Context, identity RequestIdentity, clientID [16]byte, pin []byte) (err error) {
+	defer func() {
+		code := ""
+		if err != nil {
+			code = outcomeCode(response{Error: encodeError(err)})
+		}
+		target.obs.emitAudit(ctx, AuditEvent{
+			Type: "pin_rotation", Target: target.id, ClientID: hexID(clientID), Principal: identity.Principal, Code: code,
+		})
+	}()
 	// Rotation affects every client sharing the token. Check permission before
-	// logging out, not only when the replacement login starts.
+	// clearing their state or logging out. The replacement activation is already
+	// authorized here and must not ask the authorizer a second time.
+	if err := target.authorizeOperation(ctx, identity, clientID, AuthorizationOperationRotatePIN, false); err != nil {
+		return err
+	}
 	if err := target.authorizeOperation(ctx, identity, clientID, AuthorizationOperationActivateTarget, true); err != nil {
 		return err
 	}
+	cleanupErr := target.clearPINRotationState(ctx)
 	logoutErr := target.callControl(ctx, "proxy-pin-rotation-logout", false, func(module raw.Module, session raw.SessionHandle) error {
 		return module.Logout(session)
 	})
@@ -626,10 +636,10 @@ func (target *brokerTarget) rotatePINActivation(ctx context.Context, identity Re
 		logoutErr = nil
 	}
 	target.invalidatePhysicalLogin()
-	if _, err := target.ensurePhysicalLogin(ctx, identity, clientID, target.physicalUserType, target.physicalUsername, pin, true, true); err != nil {
-		return errors.Join(err, logoutErr)
+	if _, err := target.ensurePhysicalLogin(ctx, identity, clientID, target.physicalUserType, target.physicalUsername, pin, true, false); err != nil {
+		return errors.Join(err, logoutErr, cleanupErr)
 	}
-	return logoutErr
+	return errors.Join(logoutErr, cleanupErr)
 }
 
 func (client *logicalClient) logicalLogout(ctx context.Context, target *brokerTarget) error {
@@ -644,89 +654,7 @@ func (client *logicalClient) logicalLogout(ctx context.Context, target *brokerTa
 	client.stateMu.Unlock()
 	target.obs.emitAudit(ctx, AuditEvent{Type: "logout", Target: target.id, ClientID: hexID(client.id), Principal: client.principal})
 
-	privateSessionObjects := client.takePrivateObjects()
-
-	client.sessionsMu.Lock()
-	sessions := make([]*virtualSession, 0, len(client.sessions))
-	for _, session := range client.sessions {
-		sessions = append(sessions, session)
-	}
-	client.sessionsMu.Unlock()
-	var errs []error
-	for _, session := range sessions {
-		session.mu.Lock()
-		session.touch()
-
-		// Take the lifetime write lock before canceling operations or destroying
-		// private session objects. Cross-session users hold the corresponding read
-		// lock, so logout waits for their native calls to finish rather than
-		// invalidating an object handle underneath them.
-		session.lifetime.Lock()
-		lease := session.lease
-		if lease == nil {
-			session.lifetime.Unlock()
-			session.mu.Unlock()
-			continue
-		}
-
-		// Logical logout must not call the token-wide physical C_Logout. Instead,
-		// cancel this client's active operations and explicitly destroy its private
-		// session objects while preserving public session objects and other clients.
-		flags := cancelFlagsForOperations(session.operations)
-		var cleanupErr error
-		if flags != 0 {
-			cleanupErr = lease.Call(ctx, "proxy-logical-logout-cancel", func(module raw.Module, native raw.SessionHandle) error {
-				return module.SessionCancel(native, flags)
-			})
-		}
-		if cleanupErr == nil {
-			for _, object := range privateSessionObjects[session.handle] {
-				err := lease.Call(ctx, "proxy-logical-logout-destroy-private-session-object", func(module raw.Module, native raw.SessionHandle) error {
-					return module.DestroyObject(native, object)
-				})
-				if err != nil && !raw.IsError(err, raw.CKR_OBJECT_HANDLE_INVALID) {
-					cleanupErr = errors.Join(cleanupErr, err)
-				}
-			}
-		}
-
-		if cleanupErr != nil {
-			// The native session's post-logout state is uncertain. Detach it while
-			// the lifetime lock is held, then invalidate every remaining affine
-			// handle owned by the discarded native session.
-			session.clearOperationsLocked()
-			session.affineObjects.Store(0)
-			session.lease = nil
-			if session.pinnedCounted {
-				session.pinnedCounted = false
-				target.releasePinned()
-			}
-			lease.MarkBroken()
-			closeErr := lease.Close(ctx)
-			session.lifetime.Unlock()
-			client.removeAffineObjects(session.handle)
-			errs = append(errs, errors.Join(cleanupErr, closeErr))
-			session.mu.Unlock()
-			continue
-		}
-
-		session.clearOperationsLocked()
-		if count := int64(len(privateSessionObjects[session.handle])); count > 0 {
-			for {
-				current := session.affineObjects.Load()
-				next := max(current-count, 0)
-				if session.affineObjects.CompareAndSwap(current, next) {
-					break
-				}
-			}
-		}
-		session.lifetime.Unlock()
-		if err := session.releaseIfIdle(ctx, target); err != nil {
-			errs = append(errs, err)
-		}
-		session.mu.Unlock()
-	}
-	return errors.Join(errs...)
+	return client.cleanupLoginState(ctx, target)
 }
 
 func (target *brokerTarget) allowedUserType(userType uint) bool {
@@ -739,8 +667,8 @@ func (target *brokerTarget) allowedUserType(userType uint) bool {
 
 // ensurePhysicalLogin establishes or joins one target-wide activation attempt.
 // suppliedAvailable distinguishes an unavailable credential from a legitimate
-// zero-length PIN. authorizeActivation is false only for broker-internal
-// server-managed/protected-path recovery and eager startup.
+// zero-length PIN. authorizeActivation is false for broker-internal recovery and
+// eager startup, or for a rotation authorized before the token-wide logout.
 func (target *brokerTarget) ensurePhysicalLogin(
 	ctx context.Context,
 	identity RequestIdentity,
@@ -770,6 +698,14 @@ func (target *brokerTarget) ensurePhysicalLogin(
 			// attempt, so the audit event corresponds to exactly one device
 			// login try — followers wait for the shared result instead.
 			performErr := target.performPhysicalLogin(ctx, supplied, suppliedAvailable)
+			// Only an actual HSM credential rejection can disarm the accepted PIN.
+			// A wrong replacement, cooldown result, policy denial, or transient
+			// device failure must leave the old gate in place.
+			if suppliedAvailable && physicalPINRejected(performErr) {
+				if armed, matched := target.pinVerifier.verifyArmed(supplied); armed && matched {
+					target.pinVerifier.clear()
+				}
+			}
 			eventType := "activation"
 			if performErr != nil {
 				eventType = "activation_failure"
@@ -953,9 +889,24 @@ func (target *brokerTarget) loginPhysicalLease(ctx context.Context, lease *pkcs1
 
 func (target *brokerTarget) invalidatePhysicalLogin() {
 	target.activation.invalidate(target.login.Mode == PhysicalLoginClientActivated)
-	// Losing activation drops the armed digest: the next activation re-arms it
-	// from that attempt's PIN.
-	target.pinVerifier.clear()
+	// With rotation enabled, the PIN gate outlives physical activation, including
+	// indirect invalidation by control-session recovery. Otherwise a failed
+	// replacement PIN could consume an HSM retry on every cooldown.
+	if target.login.PINRotationInterval <= 0 {
+		target.pinVerifier.clear()
+	}
+}
+
+// physicalPINRejected distinguishes an unusable credential from a transient
+// transport, session, or device failure. It is used only after a physical call,
+// never for a cached activation failure or a logical authentication callback.
+func physicalPINRejected(err error) bool {
+	return raw.IsError(err, raw.CKR_PIN_INCORRECT) ||
+		raw.IsError(err, raw.CKR_PIN_INVALID) ||
+		raw.IsError(err, raw.CKR_PIN_LEN_RANGE) ||
+		raw.IsError(err, raw.CKR_PIN_EXPIRED) ||
+		raw.IsError(err, raw.CKR_PIN_LOCKED) ||
+		raw.IsError(err, raw.CKR_USER_PIN_NOT_INITIALIZED)
 }
 
 func (target *brokerTarget) ensureLeaseAuthenticated(ctx context.Context, client *logicalClient, lease *pkcs11.RawSessionLease) error {
@@ -988,6 +939,11 @@ func (target *brokerTarget) contextLogin(ctx context.Context, identity RequestId
 	}
 	if err := target.authenticateLogical(ctx, identity, userType, username, supplied); err != nil {
 		return err
+	}
+	// Context-specific authentication can only prove the armed PIN. It must not
+	// start a token-wide rotation, even when the rotation interval has elapsed.
+	if armed, matched := target.pinVerifier.verifyArmed(supplied); armed && !matched {
+		return raw.Error(raw.CKR_PIN_INCORRECT)
 	}
 	var (
 		secret pkcs11.Secret

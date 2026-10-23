@@ -44,7 +44,9 @@ func TestBeforeListRoutesRunsPerListingAndToleratesFailure(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		_ = server.Close(context.Background())
-		<-serveDone
+		if err := <-serveDone; err != nil {
+			t.Errorf("serve: %v", err)
+		}
 	})
 
 	target := Target{Endpoints: []string{listener.Addr().String()}, AllowInsecure: true, RequestTimeout: 5 * time.Second}
@@ -116,8 +118,8 @@ func TestRetireTargetUnpublishesThenDrains(t *testing.T) {
 		t.Fatalf("catalog after retire = %+v, want empty", routes)
 	}
 	select {
-	case <-retired:
-		t.Fatal("retire channel closed while the gated call was still in flight")
+	case err := <-retired:
+		t.Fatalf("retire channel closed while the gated call was still in flight (err=%v)", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 	select {
@@ -154,7 +156,10 @@ func TestRetireTargetUnknownRoute(t *testing.T) {
 	server := &Server{}
 	done := server.RetireTarget("never-published")
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("retiring an unknown route: %v", err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("retiring an unknown route did not return a completed channel")
 	}

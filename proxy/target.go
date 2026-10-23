@@ -196,13 +196,22 @@ type LoginPolicy struct {
 	// Zero uses a one-second default. Negative disables the cooldown. Concurrent callers still share
 	// one attempt.
 	ActivationFailureCooldown time.Duration
-	// VerifyClientPIN makes later logical logins match the PIN that activated the current generation.
-	// The broker stores only an HMAC of that PIN, so wrong PINs can be rejected without spending an
-	// HSM retry. Valid only in client-activated mode.
+	// VerifyClientPIN checks later logical and context-specific logins against
+	// the PIN accepted by the HSM. The broker stores only an HMAC of that PIN,
+	// so mismatches can be rejected without spending an HSM retry. Valid only
+	// in client-activated mode. Context-specific logins never initiate rotation.
 	VerifyClientPIN bool
-	// PINRotationInterval lets a mismatched PIN try one new physical activation after this interval.
-	// This supports PINs rotated directly on the HSM. Zero disables this behavior. Valid only with
-	// VerifyClientPIN.
+	// PINRotationInterval lets a mismatched PIN try one new physical activation
+	// once this interval has elapsed since the last physical login attempt.
+	// Rotation requires both AuthorizationOperationRotatePIN and
+	// AuthorizationOperationActivateTarget before any shared state is cleared
+	// or the HSM is logged out. It ends all clients' active operations and
+	// invalidates their grants and private objects; a successful leader receives
+	// a new grant. With a positive interval, the armed PIN survives activation
+	// loss and failed rotation. A credential error during reactivation clears the
+	// gate; successful activation rearms it. Zero disables rotation and retains
+	// clear-on-activation-loss behavior.
+	// Valid only with VerifyClientPIN; negative values are invalid.
 	PINRotationInterval time.Duration
 }
 
@@ -243,7 +252,10 @@ type TargetConfig struct {
 	// Authorize applies target-level authorization after transport authentication
 	// and before HSM capacity is consumed. It also receives the synthetic
 	// AuthorizationOperationActivateTarget operation for the exact client selected
-	// to activate an inactive client-activated target.
+	// to activate an inactive client-activated target. PIN rotation checks
+	// AuthorizationOperationRotatePIN and AuthorizationOperationActivateTarget
+	// once each before changing shared state; default-deny policies must allow
+	// both operations to permit rotation.
 	Authorize OperationAuthorizer
 	// Maintenance gates destructive or application-wide token administration.
 	Maintenance MaintenancePolicy

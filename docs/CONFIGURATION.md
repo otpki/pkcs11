@@ -211,10 +211,22 @@ are invalid.
 With a positive interval, a mismatching PIN can trigger a physical logout and
 fresh login once the last physical attempt is old enough. This lets an
 application use a PIN changed directly on the HSM, but it affects the whole
-shared token. A wrong replacement can leave the route inactive and consume an
-HSM PIN retry. The rotation caller must pass activation authorization before
-the logout occurs. This interval does not replace the failure cooldown or a
-software PIN-attempt limit.
+shared token. Rotation invalidates existing grants, cancels active operations,
+and releases sessions pinned only by operations or private session objects.
+On success, the initiating client receives a fresh grant, including when it
+already held one before rotation.
+
+The rotation caller must pass authorization for both `proxy.rotate-pin` and
+`proxy.activate-target`, once each before shared state is cleared or logout
+occurs. Existing authorizers that deny unknown operation names must explicitly
+allow `proxy.rotate-pin`. Each rotation records a `pin_rotation` audit event
+with its outcome. Context-specific logins check the armed PIN and never rotate.
+
+A failed replacement can leave the route inactive and consume an HSM PIN retry,
+but it keeps the old PIN as the gate. With rotation enabled, this gate also
+survives other physical activation loss. With the default interval of zero, activation loss still clears
+the gate. This interval does not replace the failure cooldown or a software
+PIN-attempt limit.
 
 ## Health and the development dashboard
 

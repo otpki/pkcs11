@@ -1,9 +1,11 @@
 version: 2
 
 updates:
-  # go module dependencies in the root go.mod.
+  # Go dependencies across both modules.
   - package-ecosystem: gomod
-    directory: /
+    directories:
+      - /
+      - /conformance/testcontainers
     schedule:
       interval: weekly
     open-pull-requests-limit: 10

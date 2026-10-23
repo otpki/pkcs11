@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	pkcs11 "github.com/otpki/pkcs11"
+	"github.com/otpki/pkcs11"
 	"github.com/otpki/pkcs11/internal/testmock"
 	"github.com/otpki/pkcs11/proxy"
 	"github.com/otpki/pkcs11/raw"
@@ -71,7 +71,9 @@ func serveDiscoverySet(t *testing.T, set reconcilerSet) (*proxy.Server, string) 
 	t.Cleanup(func() {
 		cancel()
 		_ = server.Close(context.Background())
-		<-serveDone
+		if err := <-serveDone; err != nil {
+			t.Errorf("serve discovery server: %v", err)
+		}
 	})
 	return server, listener.Addr().String()
 }
@@ -751,7 +753,9 @@ func TestDiscoveryIntegration(t *testing.T) {
 	defer func() {
 		cancel()
 		_ = server.Close(ctx)
-		<-serveDone
+		if err := <-serveDone; err != nil {
+			t.Errorf("serve discovery server: %v", err)
+		}
 	}()
 
 	routes, err := proxy.ListRoutes(ctx, proxy.Target{
