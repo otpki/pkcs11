@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	pkcs11 "github.com/otpki/pkcs11"
+	"github.com/otpki/pkcs11"
 	"github.com/otpki/pkcs11/internal/testmock"
 	"github.com/otpki/pkcs11/raw"
 )
@@ -515,7 +515,9 @@ func TestListRoutesHidesUnauthorizedRoutes(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		_ = server.Close(context.Background())
-		<-serveDone
+		if err := <-serveDone; err != nil {
+			t.Errorf("serve: %v", err)
+		}
 	})
 
 	listTarget := func(principal string) Target {
@@ -617,7 +619,9 @@ func TestRequestDefaultWorkloadCredential(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		_ = server.Close(context.Background())
-		<-serveDone
+		if err := <-serveDone; err != nil {
+			t.Errorf("serve: %v", err)
+		}
 	})
 
 	for _, tc := range []struct {
@@ -760,7 +764,9 @@ func TestMutualTLSIdentityAuthorizesLogicalLogin(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		_ = server.Close(context.Background())
-		<-done
+		if err := <-done; err != nil {
+			t.Errorf("serve: %v", err)
+		}
 	})
 
 	client := openRemoteRaw(t, Target{
@@ -1576,7 +1582,9 @@ func TestServingContextCancelKeepsEstablishedClients(t *testing.T) {
 	t.Cleanup(func() {
 		cancelServe()
 		_ = server.Close(context.Background())
-		<-done
+		if err := <-done; err != nil {
+			t.Errorf("serve: %v", err)
+		}
 	})
 
 	client := openRemoteRaw(t, Target{
@@ -2512,7 +2520,9 @@ func TestLogicalClientIDIsBoundToAuthenticatedPrincipal(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		_ = server.Close(context.Background())
-		<-serveDone
+		if err := <-serveDone; err != nil {
+			t.Errorf("serve: %v", err)
+		}
 	})
 
 	newTarget := func(principal string) Target {
@@ -3464,9 +3474,8 @@ func TestPINRotationIntervalFailedAttemptEntersCooldown(t *testing.T) {
 		t.Fatalf("rotation attempts = %d, want exactly 2", got)
 	}
 
-	// During the cooldown the right PIN is refused without another attempt —
-	// the failed rotation cleared the verifier, so this is the activation
-	// cooldown answering, not PIN verification.
+	// During the cooldown the armed PIN passes verification but is refused by
+	// the activation cooldown without another physical attempt.
 	if err := clientA.Login(sessionA, raw.CKU_USER, []byte(testmock.DefaultPIN)); err == nil {
 		t.Fatal("login during failure cooldown succeeded")
 	}

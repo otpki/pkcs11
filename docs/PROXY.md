@@ -223,19 +223,31 @@ every client must prove it knows the accepted PIN, enable
 
 After a successful activation, the broker stores an HMAC-SHA-256 of the accepted
 PIN under a random per-target key. Later PINs are compared in memory. A wrong PIN
-is rejected without consuming an HSM retry.
+is rejected without consuming an HSM retry. This check also applies to
+`CKU_CONTEXT_SPECIFIC` logins, which never initiate PIN rotation.
 
 Those software checks currently have no attempt limit. The activation cooldown
 only slows physical HSM logins. A deployment with untrusted clients needs a
 separate bounded PIN-attempt policy. HSM lockout does not protect this path.
 
-The broker clears that verifier when activation is lost and updates it after a
-successful `C_SetPIN`.
+`C_SetPIN` updates the verifier. A positive `PINRotationInterval` retains it
+across activation loss; zero clears it. Grants expire with activation.
 
-If the PIN can be changed outside the broker, `PINRotationInterval` can allow an
-old verifier to be replaced. After the interval, one mismatching PIN may trigger
-a fresh physical activation. Set this carefully because every failed rotation
-attempt can consume an HSM PIN retry. A value of zero disables this behavior.
+### Accepting an externally changed PIN
+
+When the PIN changes outside the broker, a mismatching ordinary login can
+replace the verifier after `PINRotationInterval` elapses since the last
+physical login attempt. Rotation requires authorization for
+`proxy.rotate-pin` (`PhysicalActivation=false`) and `proxy.activate-target`
+(`PhysicalActivation=true`).
+
+Rotation revokes all grants and active operations, removes private handles and
+session objects, and releases their pinned sessions. The caller gets a renewed
+grant on success, others must log in again. Failure leaves the target inactive
+with the old verifier: other PINs are rejected locally until the next interval.
+After cooldown, the old PIN can reactivate the target; an HSM credential error
+clears the verifier. The cooldown applies independently. Each attempt emits a
+`pin_rotation` audit event. PINs and verifier material are never logged.
 
 ### What the broker keeps
 

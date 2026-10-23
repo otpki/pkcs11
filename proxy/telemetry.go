@@ -40,7 +40,7 @@ var (
 // broker. PINs, keys, plaintext, and attribute values are never included.
 type AuditEvent struct {
 	// Type is the stable event kind: client_established, client_destroyed,
-	// client_expired, login_grant, logout, activation, activation_failure,
+	// client_expired, login_grant, logout, activation, activation_failure, pin_rotation,
 	// maintenance, auth_failure, fence_rejection, drain_rejection,
 	// stale_generation, drain, shutdown.
 	Type string

@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	pkcs11 "github.com/otpki/pkcs11"
+	"github.com/otpki/pkcs11"
 	"github.com/otpki/pkcs11/internal/testmock"
 	"github.com/otpki/pkcs11/proxy"
 	"github.com/otpki/pkcs11/raw"
@@ -300,7 +300,9 @@ func serveTarget(t *testing.T, source pkcs11.ModuleSource) (string, *proxy.Serve
 	t.Cleanup(func() {
 		cancel()
 		_ = server.Close(ctx)
-		<-serveDone
+		if err := <-serveDone; err != nil {
+			t.Errorf("serve health test server: %v", err)
+		}
 	})
 	waitBound(t, server)
 	return listener.Addr().String(), server
@@ -653,7 +655,9 @@ func TestHealthEndpointIntegration(t *testing.T) {
 	defer func() {
 		cancel()
 		_ = server.Close(ctx)
-		<-serveDone
+		if err := <-serveDone; err != nil {
+			t.Errorf("serve health test server: %v", err)
+		}
 	}()
 	waitBound(t, server)
 

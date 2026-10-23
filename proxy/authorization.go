@@ -12,6 +12,12 @@ import (
 // inactive shared target.
 const AuthorizationOperationActivateTarget = "proxy.activate-target"
 
+// AuthorizationOperationRotatePIN authorizes replacing the armed client PIN by
+// logging out the shared token and attempting a new physical activation. Rotation
+// requires this permission and AuthorizationOperationActivateTarget, checked once
+// each before invalidating any client's grant, operations, or session objects.
+const AuthorizationOperationRotatePIN = "proxy.rotate-pin"
+
 // AuthorizationOperationListRoutes lets a target hide itself from a caller's route catalog, so a
 // default-deny Authorize must allow it. Server.RouteCatalog remains unfiltered for operators.
 const AuthorizationOperationListRoutes = "proxy.list-routes"
@@ -25,11 +31,12 @@ type AuthorizationRequest struct {
 	Revision string
 	ClientID [16]byte
 	// Operation is a raw.Module method name,
-	// AuthorizationOperationActivateTarget, or
+	// AuthorizationOperationActivateTarget, AuthorizationOperationRotatePIN, or
 	// AuthorizationOperationListRoutes.
 	Operation string
-	// PhysicalActivation is true only for the exact caller selected as leader of
-	// an inactive target's activation attempt.
+	// PhysicalActivation is true only for the exact caller selected to perform
+	// physical activation, including a preauthorized PIN rotation. The separate
+	// AuthorizationOperationRotatePIN check sets it to false.
 	PhysicalActivation bool
 }
 

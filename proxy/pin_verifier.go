@@ -13,8 +13,10 @@ import (
 // This verifier has no attempt limit. HSM lockout and activation cooldown do
 // not protect this software path from PIN guessing.
 //
-// The verifier is bound to one activation generation and is cleared when that
-// activation is lost. Target close wipes both the digest and HMAC key.
+// The generation binds grants to a successful activation. With PIN rotation
+// enabled, the armed digest also gates reactivation while the target is inactive;
+// losing physical login must not bypass the rotation interval. Target close wipes
+// both the digest and HMAC key.
 type pinVerifier struct {
 	mu         sync.Mutex
 	key        [32]byte
@@ -59,13 +61,31 @@ func (v *pinVerifier) verify(pin []byte, generation uint64) (armed, matched bool
 	if !v.armed || v.generation != generation {
 		return false, false
 	}
-	mac := hmac.New(sha256.New, v.key[:])
-	_, _ = mac.Write(pin)
-	return true, hmac.Equal(mac.Sum(nil), v.digest)
+	return true, v.matchesLocked(pin)
 }
 
-// clear drops the armed digest when physical login is invalidated. The key
-// survives so the next activation re-arms under it.
+// verifyArmed checks the last accepted PIN independently of physical activation.
+// A failed rotation invalidates the old generation but must leave this gate armed.
+func (v *pinVerifier) verifyArmed(pin []byte) (armed, matched bool) {
+	if v == nil {
+		return false, false
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if !v.armed {
+		return false, false
+	}
+	return true, v.matchesLocked(pin)
+}
+
+func (v *pinVerifier) matchesLocked(pin []byte) bool {
+	mac := hmac.New(sha256.New, v.key[:])
+	_, _ = mac.Write(pin)
+	return hmac.Equal(mac.Sum(nil), v.digest)
+}
+
+// clear drops the armed digest. The key survives so the next activation re-arms
+// under it.
 func (v *pinVerifier) clear() {
 	if v == nil {
 		return

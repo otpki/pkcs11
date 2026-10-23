@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	pkcs11 "github.com/otpki/pkcs11"
+	"github.com/otpki/pkcs11"
 	"github.com/otpki/pkcs11/internal/testmock"
 	"github.com/otpki/pkcs11/proxy"
 	"github.com/otpki/pkcs11/raw"
@@ -105,7 +105,9 @@ func TestTestModeEndToEnd(t *testing.T) {
 	defer func() {
 		cancel()
 		_ = server.Close(ctx)
-		<-serveDone
+		if err := <-serveDone; err != nil {
+			t.Errorf("serve test mode server: %v", err)
+		}
 	}()
 	address := listener.Addr().String()
 
@@ -198,7 +200,9 @@ func testModeServer(t *testing.T, cfg options) (string, *proxy.Server) {
 	t.Cleanup(func() {
 		cancel()
 		_ = server.Close(ctx)
-		<-serveDone
+		if err := <-serveDone; err != nil {
+			t.Errorf("serve test mode server: %v", err)
+		}
 	})
 	return listener.Addr().String(), server
 }
