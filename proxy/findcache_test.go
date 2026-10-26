@@ -105,9 +105,9 @@ func TestFindCacheInvalidatesOnMutationAndLogin(t *testing.T) {
 }
 
 // Cryptoki allows one enumeration per session. A replayed find must therefore
-// reject a second init exactly like a live native find — the broker's own
-// nested locator checks (verifyStableLocator inside result virtualization)
-// depend on CKR_OPERATION_ACTIVE rather than silently taking over the session.
+// reject a second init exactly like a live native find. nested locator
+// checks during object resolution depend on CKR_OPERATION_ACTIVE rather than
+// silently taking over the session.
 func TestFindCacheRejectsNestedEnumeration(t *testing.T) {
 	module, inner, session := newFindCacheFixture(t)
 	defer func() { _ = module.Finalize() }()
@@ -203,11 +203,11 @@ func TestResolvedObjectMemoizesNativeHandle(t *testing.T) {
 	borrows := newObjectBorrowSet(target)
 	vsession := &virtualSession{}
 
-	resolved, err := client.resolveObjectBorrowed(module, session, vsession, borrows, virtual)
+	resolved, err := client.resolveObjectBorrowed(module, session, 0, vsession, borrows, virtual)
 	if err != nil || resolved != native {
 		t.Fatalf("first resolve = %d, %v; want %d", resolved, err, native)
 	}
-	resolved, err = client.resolveObjectBorrowed(module, session, vsession, borrows, virtual)
+	resolved, err = client.resolveObjectBorrowed(module, session, 0, vsession, borrows, virtual)
 	if err != nil || resolved != native {
 		t.Fatalf("second resolve = %d, %v; want %d", resolved, err, native)
 	}
@@ -216,7 +216,7 @@ func TestResolvedObjectMemoizesNativeHandle(t *testing.T) {
 	}
 
 	client.dropResolvedObjects()
-	if _, err := client.resolveObjectBorrowed(module, session, vsession, borrows, virtual); err != nil {
+	if _, err := client.resolveObjectBorrowed(module, session, 0, vsession, borrows, virtual); err != nil {
 		t.Fatal(err)
 	}
 	if got := inner.findAll.Load(); got != 2 {
@@ -224,7 +224,7 @@ func TestResolvedObjectMemoizesNativeHandle(t *testing.T) {
 	}
 
 	client.removeObject(vsession, virtual)
-	if _, err := client.resolveObjectBorrowed(module, session, vsession, borrows, virtual); err == nil {
+	if _, err := client.resolveObjectBorrowed(module, session, 0, vsession, borrows, virtual); err == nil {
 		t.Fatal("removed object still resolves")
 	}
 }

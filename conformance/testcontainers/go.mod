@@ -5,7 +5,7 @@ go 1.27
 require (
 	github.com/moby/moby/client v0.6.2
 	github.com/opencontainers/image-spec v1.1.1
-	github.com/otpki/pkcs11 v0.1.0
+	github.com/otpki/pkcs11 v0.1.1
 	github.com/testcontainers/testcontainers-go v0.44.0
 )
 

@@ -137,6 +137,17 @@ func (lease *RawSessionLease) Handle() raw.SessionHandle {
 	return lease.lease.handle
 }
 
+// SessionID identifies the physical session instance this lease wraps. The id
+// is unique for the process lifetime and is never reused when the session
+// closes and the provider recycles its native handle value, so it is a safe
+// session-affinity key. A nil or closed lease reports zero.
+func (lease *RawSessionLease) SessionID() uint64 {
+	if lease == nil || lease.lease == nil || lease.closed.Load() {
+		return 0
+	}
+	return lease.lease.id
+}
+
 // ReadWrite reports whether the retained physical session is read/write.
 func (lease *RawSessionLease) ReadWrite() bool {
 	return lease != nil && lease.lease != nil && lease.lease.ReadWrite()
