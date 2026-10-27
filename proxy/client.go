@@ -1140,6 +1140,14 @@ func (client *Client) GetAttributeValues(session raw.SessionHandle, objects []ra
 		for i := range calls {
 			index := start + i
 			if calls[i].Err != nil {
+				if kept := readableAttributes(values[i]); len(kept) > 0 {
+					// The read failed on some attributes but still returned
+					// the ones it could resolve. keeping them saves a second
+					// read of every attribute on providers that "charge"
+					// per call
+					results[index] = kept
+					continue
+				}
 				failed = append(failed, index)
 				continue
 			}
@@ -1216,6 +1224,18 @@ func (client *Client) SignOnce(session raw.SessionHandle, mechanisms []*raw.Mech
 		return nil, calls[0].Err
 	}
 	return signature, calls[1].Err
+}
+
+// readableAttributes drops template entries whose read returned no value,
+// leaving the attributes a partial failure still resolved.
+func readableAttributes(attributes []*raw.Attribute) []*raw.Attribute {
+	kept := make([]*raw.Attribute, 0, len(attributes))
+	for _, attribute := range attributes {
+		if attribute != nil && attribute.Value != nil {
+			kept = append(kept, attribute)
+		}
+	}
+	return kept
 }
 
 // cloneAttributeTemplate deep-copies an attribute template so each batched

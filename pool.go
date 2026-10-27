@@ -12,6 +12,11 @@ import (
 	"github.com/otpki/pkcs11/raw"
 )
 
+// physicalSessionSeq mints the "per-open" identity carried by pooledSession.id.
+// It is intentionally global rather than per pool or module so identities never
+// repeat anywhere in the process.
+var physicalSessionSeq atomic.Uint64
+
 // poolConfig is the normalized capacity and idle-retirement policy used by one
 // read-only or read/write session pool. Values are resolved against both the
 // token-reported limits and the selected adapter before the pool is created.
@@ -69,6 +74,10 @@ type sessionPoolConfig struct {
 // be reused only while its generation matches the module generation.
 type pooledSession struct {
 	handle raw.SessionHandle
+	// id identifies this physical session instance for the process lifetime.
+	// Providers may recycle handle values across close/open cycles, so id is
+	// minted per open rather than derived from the handle.
+	id uint64
 	// generation identifies the module initialization that created handle.
 	generation uint64
 	// lastUsed is meaningful only while the item is in the idle queue.
@@ -128,6 +137,8 @@ type sessionPool struct {
 type sessionLease struct {
 	pool   *sessionPool
 	handle raw.SessionHandle
+	// id is the physical session instance identity from the pooled session.
+	id uint64
 	// generation must still match the module when the lease is returned.
 	generation uint64
 	// ctx is the acquisition context used by managed calls and hooks.
@@ -232,7 +243,7 @@ func (s *sessionLease) Close(ctx context.Context) error {
 	}
 	s.once.Do(func() {
 		s.closed.Store(true)
-		s.closeErr = s.pool.release(ctx, pooledSession{handle: s.handle, generation: s.generation, lastUsed: time.Now(), worker: s.worker, authentication: s.authentication, openedAt: s.openedAt, uses: s.uses.Load()}, s.broken.Load())
+		s.closeErr = s.pool.release(ctx, pooledSession{handle: s.handle, id: s.id, generation: s.generation, lastUsed: time.Now(), worker: s.worker, authentication: s.authentication, openedAt: s.openedAt, uses: s.uses.Load()}, s.broken.Load())
 	})
 	return s.closeErr
 }
@@ -521,7 +532,7 @@ func (p *sessionPool) Acquire(ctx context.Context) (*sessionLease, error) {
 	p.active++
 	p.mu.Unlock()
 	releaseLease = false
-	lease := &sessionLease{pool: p, handle: item.handle, generation: item.generation, ctx: ctx, worker: item.worker, authentication: item.authentication, openedAt: item.openedAt}
+	lease := &sessionLease{pool: p, handle: item.handle, id: item.id, generation: item.generation, ctx: ctx, worker: item.worker, authentication: item.authentication, openedAt: item.openedAt}
 	lease.uses.Store(item.uses)
 	return lease, nil
 }
@@ -548,7 +559,7 @@ func (p *sessionPool) openHandle(ctx context.Context, login bool) (pooledSession
 		}
 	}()
 	device := p.currentDevice()
-	item := pooledSession{generation: p.module.currentGeneration(), openedAt: time.Now()}
+	item := pooledSession{id: physicalSessionSeq.Add(1), generation: p.module.currentGeneration(), openedAt: time.Now()}
 	if device.plan.sessions.lockOSThread {
 		item.worker = newSessionWorker()
 	}

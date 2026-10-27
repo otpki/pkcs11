@@ -11,18 +11,20 @@ import (
 )
 
 type virtualObject struct {
-	handle       raw.ObjectHandle
-	ownerSession raw.SessionHandle
-	native       raw.ObjectHandle
-	affine       bool
-	recoverable  bool
-	token        bool
-	private      bool
-	class        uint
-	keyType      uint
-	uniqueID     string
-	id           []byte
-	label        string
+	handle         raw.ObjectHandle
+	ownerSession   raw.SessionHandle
+	native         raw.ObjectHandle
+	affine         bool
+	recoverable    bool
+	locatorChecked bool
+	bornOn         uint64
+	token          bool
+	private        bool
+	class          uint
+	keyType        uint
+	uniqueID       string
+	id             []byte
+	label          string
 }
 
 func optionalAttribute(module raw.Module, session raw.SessionHandle, object raw.ObjectHandle, typ uint) ([]byte, bool, error) {
@@ -36,51 +38,72 @@ func optionalAttribute(module raw.Module, session raw.SessionHandle, object raw.
 	return nil, false, err
 }
 
+// inspectAttributeTypes lists the attributes read to classify and locate one
+// discovered object.
+var inspectAttributeTypes = []uint{
+	raw.CKA_CLASS, raw.CKA_KEY_TYPE, raw.CKA_TOKEN, raw.CKA_PRIVATE,
+	raw.CKA_UNIQUE_ID, raw.CKA_ID, raw.CKA_LABEL,
+}
+
 func inspectNativeObject(module raw.Module, session raw.SessionHandle, object raw.ObjectHandle) (*virtualObject, error) {
 	result := &virtualObject{native: object}
-	if value, ok, err := optionalAttribute(module, session, object, raw.CKA_CLASS); err != nil {
+	attributes, err := readInspectedAttributes(module, session, object)
+	if err != nil {
 		return nil, err
-	} else if ok {
-		result.class, _ = raw.ULong(value)
-	}
-	if value, ok, err := optionalAttribute(module, session, object, raw.CKA_KEY_TYPE); err != nil {
-		return nil, err
-	} else if ok {
-		result.keyType, _ = raw.ULong(value)
-	}
-	if value, ok, err := optionalAttribute(module, session, object, raw.CKA_TOKEN); err != nil {
-		return nil, err
-	} else if ok {
-		result.token, _ = raw.Bool(value)
 	}
 	privateKnown := false
-	if value, ok, err := optionalAttribute(module, session, object, raw.CKA_PRIVATE); err != nil {
-		return nil, err
-	} else if ok {
-		result.private, _ = raw.Bool(value)
-		privateKnown = true
+	for _, attribute := range attributes {
+		if attribute == nil || attribute.Value == nil {
+			continue
+		}
+		switch attribute.Type {
+		case raw.CKA_CLASS:
+			result.class, _ = raw.ULong(attribute.Value)
+		case raw.CKA_KEY_TYPE:
+			result.keyType, _ = raw.ULong(attribute.Value)
+		case raw.CKA_TOKEN:
+			result.token, _ = raw.Bool(attribute.Value)
+		case raw.CKA_PRIVATE:
+			result.private, _ = raw.Bool(attribute.Value)
+			privateKnown = true
+		case raw.CKA_UNIQUE_ID:
+			result.uniqueID = string(attribute.Value)
+		case raw.CKA_ID:
+			result.id = slices.Clone(attribute.Value)
+		case raw.CKA_LABEL:
+			result.label = string(attribute.Value)
+		}
 	}
 	if !privateKnown && (result.class == raw.CKO_PRIVATE_KEY || result.class == raw.CKO_SECRET_KEY) {
 		// Prefer false negatives over accidentally exposing a private object after
 		// another logical client caused the physical token to be logged in.
 		result.private = true
 	}
-	if value, ok, err := optionalAttribute(module, session, object, raw.CKA_UNIQUE_ID); err != nil {
-		return nil, err
-	} else if ok {
-		result.uniqueID = string(value)
-	}
-	if value, ok, err := optionalAttribute(module, session, object, raw.CKA_ID); err != nil {
-		return nil, err
-	} else if ok {
-		result.id = slices.Clone(value)
-	}
-	if value, ok, err := optionalAttribute(module, session, object, raw.CKA_LABEL); err != nil {
-		return nil, err
-	} else if ok {
-		result.label = string(value)
-	}
 	return result, nil
+}
+
+// readInspectedAttributes reads inspectAttributeTypes in one batched call
+func readInspectedAttributes(module raw.Module, session raw.SessionHandle, object raw.ObjectHandle) ([]*raw.Attribute, error) {
+	template := make([]*raw.Attribute, len(inspectAttributeTypes))
+	for i, typ := range inspectAttributeTypes {
+		template[i] = raw.NewAttribute(typ, nil)
+	}
+	attributes, err := module.GetAttributeValue(session, object, template)
+	if err == nil || (len(readableAttributes(attributes)) > 0 &&
+		(raw.IsError(err, raw.CKR_ATTRIBUTE_TYPE_INVALID) || raw.IsError(err, raw.CKR_ATTRIBUTE_SENSITIVE))) {
+		return attributes, nil
+	}
+	var collected []*raw.Attribute
+	for _, typ := range inspectAttributeTypes {
+		value, ok, attrErr := optionalAttribute(module, session, object, typ)
+		if attrErr != nil {
+			return nil, attrErr
+		}
+		if ok {
+			collected = append(collected, raw.NewAttribute(typ, value))
+		}
+	}
+	return collected, nil
 }
 
 func (object *virtualObject) hasLocator() bool {
@@ -104,14 +127,6 @@ func (object *virtualObject) locator() []*raw.Attribute {
 		attributes = append(attributes, raw.NewAttribute(raw.CKA_LABEL, object.label))
 	}
 	return attributes
-}
-
-func verifyStableLocator(module raw.Module, session raw.SessionHandle, object *virtualObject) bool {
-	if object == nil || !object.token || !object.hasLocator() {
-		return false
-	}
-	handles, err := module.FindAllObjects(session, object.locator(), 2)
-	return err == nil && len(handles) == 1 && handles[0] == object.native
 }
 
 // wrapObject publishes a virtual handle for a native object. produced is true
@@ -144,7 +159,8 @@ func (client *logicalClient) wrapObject(module raw.Module, nativeSession raw.Ses
 		return 0, false, false, client.authenticationRequiredError()
 	}
 	object.affine = !object.token
-	object.recoverable = object.token && verifyStableLocator(module, nativeSession, object)
+	object.recoverable = object.token && object.hasLocator()
+	object.bornOn = lease.SessionID()
 
 	// owner is the virtual session whose native session owns the object for
 	// session-scoped values. New objects belong to the calling session;
@@ -336,7 +352,7 @@ func (borrows *objectBorrowSet) close(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (client *logicalClient) resolveObjectBorrowed(module raw.Module, nativeSession raw.SessionHandle, session *virtualSession, borrows *objectBorrowSet, handle raw.ObjectHandle) (raw.ObjectHandle, error) {
+func (client *logicalClient) resolveObjectBorrowed(module raw.Module, nativeSession raw.SessionHandle, sessionID uint64, session *virtualSession, borrows *objectBorrowSet, handle raw.ObjectHandle) (raw.ObjectHandle, error) {
 	if handle == 0 {
 		return 0, nil
 	}
@@ -368,21 +384,49 @@ func (client *logicalClient) resolveObjectBorrowed(module raw.Module, nativeSess
 	key := resolvedObjectKey{handle: handle, session: nativeSession}
 	client.objectsMu.Lock()
 	memo := client.resolved[key]
-	client.objectsMu.Unlock()
+	stored := client.objects[handle]
 	if memo != 0 {
+		client.objectsMu.Unlock()
 		return memo, nil
 	}
+	if stored != nil && stored.bornOn != 0 && stored.bornOn == sessionID {
+		// the minting session is asking for its own handle back
+		client.resolved[key] = stored.native
+		client.objectsMu.Unlock()
+		return stored.native, nil
+	}
+	client.objectsMu.Unlock()
+	// first use on this session, find the object by its locator
 	handles, err := module.FindAllObjects(nativeSession, object.locator(), 2)
+	if err == nil && len(handles) == 1 {
+		client.objectsMu.Lock()
+		stored := client.objects[handle]
+		if stored == nil {
+			client.objectsMu.Unlock()
+			return 0, raw.Error(raw.CKR_OBJECT_HANDLE_INVALID)
+		}
+		// exactly one match, remember the handle for this session and mark
+		// the locator
+		stored.locatorChecked = true
+		client.resolved[key] = handles[0]
+		client.objectsMu.Unlock()
+		return handles[0], nil
+	}
+	if !object.locatorChecked {
+		// the first check failed or matched several objects, keep the native
+		// handle and never check again
+		client.objectsMu.Lock()
+		if stored := client.objects[handle]; stored != nil {
+			stored.locatorChecked = true
+			stored.recoverable = false
+		}
+		client.objectsMu.Unlock()
+		return object.native, nil
+	}
 	if err != nil {
 		return 0, err
 	}
-	if len(handles) != 1 {
-		return 0, raw.Error(raw.CKR_OBJECT_HANDLE_INVALID)
-	}
-	client.objectsMu.Lock()
-	client.resolved[key] = handles[0]
-	client.objectsMu.Unlock()
-	return handles[0], nil
+	return 0, raw.Error(raw.CKR_OBJECT_HANDLE_INVALID)
 }
 
 // dropResolvedObjects forgets memoized native handle resolutions. Called when
@@ -489,7 +533,10 @@ func (client *logicalClient) refreshObject(module raw.Module, nativeSession raw.
 	}
 	updated.handle = handle
 	updated.affine = !updated.token
-	updated.recoverable = updated.token && verifyStableLocator(module, nativeSession, updated)
+	updated.recoverable = updated.token && updated.hasLocator()
+	// the refreshed native handle was resolved or minted on this physical
+	// session, so a later resolve here can reuse it without a locator search.
+	updated.bornOn = lease.SessionID()
 	if updated.affine {
 		updated.ownerSession = session.handle
 	}
@@ -542,7 +589,7 @@ func (client *logicalClient) resolveObjectOnLease(ctx context.Context, lease *pk
 	var native raw.ObjectHandle
 	err := lease.Call(ctx, "proxy-resolve-object", func(module raw.Module, nativeSession raw.SessionHandle) error {
 		var resolveErr error
-		native, resolveErr = client.resolveObjectBorrowed(module, nativeSession, session, borrows, handle)
+		native, resolveErr = client.resolveObjectBorrowed(module, nativeSession, lease.SessionID(), session, borrows, handle)
 		return resolveErr
 	})
 	return native, err
