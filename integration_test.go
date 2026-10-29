@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,9 @@ func TestIntegration(t *testing.T) {
 			testIntegrationGenerateAndDestroy(ctx, t, client, algorithm)
 		})
 	}
+	t.Run("find-raw", func(t *testing.T) {
+		testIntegrationFindRaw(ctx, t, client)
+	})
 }
 
 func splitIntegrationAlgorithms(value string) []string {
@@ -118,5 +122,59 @@ func testIntegrationGenerateAndDestroy(ctx context.Context, t *testing.T, client
 	}
 	if err := client.Destroy(ctx, pair.Public); err != nil {
 		t.Errorf("destroy public key: %v", err)
+	}
+}
+
+// testIntegrationFindRaw runs FindRaw over the module's own C_FindObjects, for token
+// objects and for a session object, which dies when the client closes its sessions.
+func testIntegrationFindRaw(ctx context.Context, t *testing.T, client *Client) {
+	t.Helper()
+	label := fmt.Sprintf("otpki-pkcs11-integration-find-raw-%d", time.Now().UnixNano())
+	pair, err := client.GenerateKeyPair(ctx, KeyPairOptions{Algorithm: AlgorithmRSA, Label: label, ID: []byte(label)})
+	if err != nil {
+		t.Fatalf("generate key pair: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Destroy(ctx, pair.Private); err != nil {
+			t.Errorf("destroy private key: %v", err)
+		}
+		if err := client.Destroy(ctx, pair.Public); err != nil {
+			t.Errorf("destroy public key: %v", err)
+		}
+	})
+
+	found, err := client.Find(ctx, ObjectQuery{Label: label})
+	if err != nil || len(found) != 2 {
+		t.Fatalf("Find = %v, %v; want the private and the public key", found, err)
+	}
+	described, err := client.FindRaw(ctx, RawSessionOptions{}, findByLabel(label))
+	if err != nil {
+		t.Fatalf("FindRaw: %v", err)
+	}
+	if !reflect.DeepEqual(byHandle(described), byHandle(found)) {
+		t.Fatalf("FindRaw = %+v, want Find's %+v", described, found)
+	}
+	for _, ref := range described {
+		if _, err := client.Attributes(ctx, ref, raw.NewAttribute(raw.CKA_LABEL, nil)); err != nil {
+			t.Fatalf("Attributes: %v", err)
+		}
+	}
+
+	sessionLabel := label + "-session"
+	sessionObjects, err := client.FindRaw(ctx, RawSessionOptions{}, func(module raw.Module, session raw.SessionHandle) ([]raw.ObjectHandle, error) {
+		if _, err := module.CreateObject(session, []*raw.Attribute{
+			raw.NewAttribute(raw.CKA_CLASS, raw.CKO_DATA),
+			raw.NewAttribute(raw.CKA_TOKEN, false),
+			raw.NewAttribute(raw.CKA_LABEL, sessionLabel),
+		}); err != nil {
+			return nil, err
+		}
+		return findByLabel(sessionLabel)(module, session)
+	})
+	if err != nil {
+		t.Fatalf("FindRaw of a session object: %v", err)
+	}
+	if len(sessionObjects) != 1 || sessionObjects[0].Class != raw.CKO_DATA || sessionObjects[0].Label != sessionLabel {
+		t.Errorf("FindRaw = %+v, want the session object", sessionObjects)
 	}
 }

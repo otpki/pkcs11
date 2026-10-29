@@ -85,6 +85,18 @@ func queryCacheKey(query ObjectQuery) string {
 	return b.String()
 }
 
+// rawFindCacheKey keys FindRaw's references by their handles under a namespace
+// word of its own, so they cannot collide with Find's query keys.
+func rawFindCacheKey(handles []raw.ObjectHandle) string {
+	var b strings.Builder
+	b.WriteString("raw-find")
+	for _, handle := range handles {
+		b.WriteString(";")
+		b.WriteString(strconv.FormatUint(uint64(handle), 16))
+	}
+	return b.String()
+}
+
 func sameObjectRef(left, right ObjectRef) bool {
 	if left.Handle != 0 && right.Handle != 0 && left.Handle == right.Handle {
 		return true
@@ -181,81 +193,130 @@ func (c *Client) Find(ctx context.Context, query ObjectQuery) ([]ObjectRef, erro
 		if query.Limit > 0 && len(handles) > query.Limit {
 			handles = handles[:query.Limit]
 		}
-		requested := []*raw.Attribute{
-			raw.NewAttribute(raw.CKA_CLASS, nil), raw.NewAttribute(raw.CKA_KEY_TYPE, nil),
-			raw.NewAttribute(raw.CKA_UNIQUE_ID, nil),
-			raw.NewAttribute(raw.CKA_LABEL, nil), raw.NewAttribute(raw.CKA_ID, nil),
-			raw.NewAttribute(raw.CKA_PARAMETER_SET, nil), raw.NewAttribute(raw.CKA_EC_PARAMS, nil),
-			raw.NewAttribute(raw.CKA_VALUE_LEN, nil), raw.NewAttribute(raw.CKA_MODULUS_BITS, nil),
-		}
-		device := session.currentDevice()
-		if device.vendor != nil {
-			for _, attributeType := range device.vendor.ObjectAttributes() {
-				requested = append(requested, raw.NewAttribute(attributeType, nil))
-			}
-		}
-		requested = mergeAttributes(requested)
-		allAttributes := make([][]*raw.Attribute, len(handles))
-		err := session.call(ctx, "C_GetAttributeValue", func(module raw.Module) error {
-			if reader, ok := module.(multiAttributeReader); ok {
-				values, errs, readErr := reader.GetAttributeValues(session.handle, handles, requested)
-				if readErr != nil {
-					return readErr
-				}
-				for i := range values {
-					if errs[i] != nil && len(values[i]) == 0 {
-						return errs[i]
-					}
-				}
-				copy(allAttributes, values)
-				return nil
-			}
-			for i, handle := range handles {
-				// GetAttributeValue fills the template in place, so each handle
-				// reads through its own copy.
-				attributes, attributeErr := module.GetAttributeValue(session.handle, handle, cloneAttributeTemplate(requested))
-				if attributeErr != nil && len(attributes) == 0 {
-					// Utimaco's CXI layer answers a batched read with a device
-					// error when any property tag is unknown instead of
-					// reporting per-attribute failures, so retry
-					// attribute-by-attribute before giving up on the object.
-					attributes, attributeErr = readObjectAttributes(module, session.handle, handle, requested)
-					if attributeErr != nil && len(attributes) == 0 {
-						return attributeErr
-					}
-				}
-				allAttributes[i] = attributes
-			}
-			return nil
-		})
-		if err != nil {
+		var err error
+		if result, err = describeObjects(ctx, session, handles); err != nil {
 			return err
-		}
-		for i, handle := range handles {
-			ref := ObjectRef{Handle: handle}
-			for _, attribute := range allAttributes[i] {
-				switch attribute.Type {
-				case raw.CKA_CLASS:
-					ref.Class, _ = raw.ULong(attribute.Value)
-				case raw.CKA_KEY_TYPE:
-					ref.KeyType, _ = raw.ULong(attribute.Value)
-				case raw.CKA_UNIQUE_ID:
-					ref.UniqueID = string(attribute.Value)
-				case raw.CKA_LABEL:
-					ref.Label = string(attribute.Value)
-				case raw.CKA_ID:
-					ref.ID = slices.Clone(attribute.Value)
-				case raw.CKA_MODULUS_BITS:
-					ref.ModulusBits, _ = raw.ULong(attribute.Value)
-				}
-			}
-			ref.Algorithm = inferAlgorithm(device, ref.KeyType, allAttributes[i])
-			result = append(result, ref)
 		}
 		c.cache.putRefs(refsKey, session.generation, result)
 		return nil
 	})
 	return result, err
+}
+
+// FindRaw returns the references of the objects a raw search finds, described
+// under the search's own session lease so no recovery falls between the two.
+// Options apply as in WithRawSession, and a replay runs search again.
+func (c *Client) FindRaw(ctx context.Context, options RawSessionOptions, search func(raw.Module, raw.SessionHandle) ([]raw.ObjectHandle, error)) ([]ObjectRef, error) {
+	if search == nil {
+		return nil, errors.New("pkcs11: nil raw search callback")
+	}
+	operation := strings.TrimSpace(options.Operation)
+	if operation == "" {
+		operation = "find-raw"
+	}
+	var result []ObjectRef
+	err := c.withSession(ctx, sessionOptions{
+		ReadWrite:  options.ReadWrite,
+		Idempotent: options.Idempotent,
+		Operation:  operation,
+		Retry:      options.Retry,
+	}, func(session *sessionLease) error {
+		result = nil
+		var handles []raw.ObjectHandle
+		err := session.DoRaw(ctx, func(module raw.Module, handle raw.SessionHandle) error {
+			var err error
+			handles, err = search(module, handle)
+			return err
+		})
+		if options.ReadWrite {
+			c.cache.invalidate()
+		}
+		if err != nil || len(handles) == 0 {
+			return err
+		}
+		if result, err = describeObjects(ctx, session, handles); err != nil {
+			return err
+		}
+		c.cache.putRefs(rawFindCacheKey(handles), session.generation, result)
+		return nil
+	})
+	return result, err
+}
+
+func describeObjects(ctx context.Context, session *sessionLease, handles []raw.ObjectHandle) ([]ObjectRef, error) {
+	result := make([]ObjectRef, 0, len(handles))
+	requested := []*raw.Attribute{
+		raw.NewAttribute(raw.CKA_CLASS, nil), raw.NewAttribute(raw.CKA_KEY_TYPE, nil),
+		raw.NewAttribute(raw.CKA_UNIQUE_ID, nil),
+		raw.NewAttribute(raw.CKA_LABEL, nil), raw.NewAttribute(raw.CKA_ID, nil),
+		raw.NewAttribute(raw.CKA_PARAMETER_SET, nil), raw.NewAttribute(raw.CKA_EC_PARAMS, nil),
+		raw.NewAttribute(raw.CKA_VALUE_LEN, nil), raw.NewAttribute(raw.CKA_MODULUS_BITS, nil),
+	}
+	device := session.currentDevice()
+	if device.vendor != nil {
+		for _, attributeType := range device.vendor.ObjectAttributes() {
+			requested = append(requested, raw.NewAttribute(attributeType, nil))
+		}
+	}
+	requested = mergeAttributes(requested)
+	allAttributes := make([][]*raw.Attribute, len(handles))
+	err := session.call(ctx, "C_GetAttributeValue", func(module raw.Module) error {
+		if reader, ok := module.(multiAttributeReader); ok {
+			values, errs, readErr := reader.GetAttributeValues(session.handle, handles, requested)
+			if readErr != nil {
+				return readErr
+			}
+			for i := range values {
+				if errs[i] != nil && len(values[i]) == 0 {
+					return errs[i]
+				}
+			}
+			copy(allAttributes, values)
+			return nil
+		}
+		for i, handle := range handles {
+			// GetAttributeValue fills the template in place, so each handle
+			// reads through its own copy.
+			attributes, attributeErr := module.GetAttributeValue(session.handle, handle, cloneAttributeTemplate(requested))
+			if attributeErr != nil && len(attributes) == 0 {
+				// Utimaco's CXI layer answers a batched read with a device
+				// error when any property tag is unknown instead of
+				// reporting per-attribute failures, so retry
+				// attribute-by-attribute before giving up on the object.
+				attributes, attributeErr = readObjectAttributes(module, session.handle, handle, requested)
+				if attributeErr != nil && len(attributes) == 0 {
+					return attributeErr
+				}
+			}
+			allAttributes[i] = attributes
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i, handle := range handles {
+		ref := ObjectRef{Handle: handle}
+		for _, attribute := range allAttributes[i] {
+			switch attribute.Type {
+			case raw.CKA_CLASS:
+				ref.Class, _ = raw.ULong(attribute.Value)
+			case raw.CKA_KEY_TYPE:
+				ref.KeyType, _ = raw.ULong(attribute.Value)
+			case raw.CKA_UNIQUE_ID:
+				ref.UniqueID = string(attribute.Value)
+			case raw.CKA_LABEL:
+				ref.Label = string(attribute.Value)
+			case raw.CKA_ID:
+				ref.ID = slices.Clone(attribute.Value)
+			case raw.CKA_MODULUS_BITS:
+				ref.ModulusBits, _ = raw.ULong(attribute.Value)
+			}
+		}
+		ref.Algorithm = inferAlgorithm(device, ref.KeyType, allAttributes[i])
+		result = append(result, ref)
+	}
+	return result, nil
 }
 
 // multiAttributeReader reads one attribute template for many objects in a
