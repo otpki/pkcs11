@@ -50,9 +50,9 @@ same rule.
 
 ## Raw callbacks are scoped
 
-`WithRawSession` and `VendorSession.Call` expose the module and the native
-session handle only during the callback. Do not save them, use them after the
-callback, or move a thread-affine session to another OS thread.
+`WithRawSession` and `VendorSession.Call` expose native handles only during the
+callback. Do not save those handles, use them after the callback, or move a
+thread-affine session to another OS thread.
 
 `raw.UnsafeParameter` is a lower-level escape hatch. The caller owns its memory,
 layout, alignment, concurrency, lifetime, and secrecy rules.

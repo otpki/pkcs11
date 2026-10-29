@@ -85,6 +85,18 @@ func queryCacheKey(query ObjectQuery) string {
 	return b.String()
 }
 
+// rawFindCacheKey keys FindRaw's references by their handles under a namespace
+// word of its own, so they cannot collide with Find's query keys.
+func rawFindCacheKey(handles []raw.ObjectHandle) string {
+	var b strings.Builder
+	b.WriteString("raw-find")
+	for _, handle := range handles {
+		b.WriteString(";")
+		b.WriteString(strconv.FormatUint(uint64(handle), 16))
+	}
+	return b.String()
+}
+
 func sameObjectRef(left, right ObjectRef) bool {
 	if left.Handle != 0 && right.Handle != 0 && left.Handle == right.Handle {
 		return true
@@ -191,38 +203,48 @@ func (c *Client) Find(ctx context.Context, query ObjectQuery) ([]ObjectRef, erro
 	return result, err
 }
 
-// Describe reads the references of objects the caller found itself, such as
-// through WithRawSession, so they need no second search. The handles must come
-// from this client and can go stale once it recovers a session or its module.
-func (c *Client) Describe(ctx context.Context, handles []raw.ObjectHandle) ([]ObjectRef, error) {
-	if len(handles) == 0 {
-		return nil, nil
+// FindRaw returns the references of the objects a raw search finds, described
+// under the search's own session lease so no recovery falls between the two.
+// Options apply as in WithRawSession, and a replay runs search again.
+func (c *Client) FindRaw(ctx context.Context, options RawSessionOptions, search func(raw.Module, raw.SessionHandle) ([]raw.ObjectHandle, error)) ([]ObjectRef, error) {
+	if search == nil {
+		return nil, errors.New("pkcs11: nil raw search callback")
+	}
+	operation := strings.TrimSpace(options.Operation)
+	if operation == "" {
+		operation = "find-raw"
 	}
 	var result []ObjectRef
-	err := c.withSession(ctx, sessionOptions{Operation: "describe-objects"}, func(session *sessionLease) error {
-		var err error
+	err := c.withSession(ctx, sessionOptions{
+		ReadWrite:  options.ReadWrite,
+		Idempotent: options.Idempotent,
+		Operation:  operation,
+		Retry:      options.Retry,
+	}, func(session *sessionLease) error {
+		result = nil
+		var handles []raw.ObjectHandle
+		err := session.DoRaw(ctx, func(module raw.Module, handle raw.SessionHandle) error {
+			var err error
+			handles, err = search(module, handle)
+			return err
+		})
+		if options.ReadWrite {
+			c.cache.invalidate()
+		}
+		if err != nil || len(handles) == 0 {
+			return err
+		}
 		if result, err = describeObjects(ctx, session, handles); err != nil {
 			return err
 		}
-		c.cache.rememberForResolution(handles, session.generation, result)
+		c.cache.putRefs(rawFindCacheKey(handles), session.generation, result)
 		return nil
 	})
 	return result, err
 }
 
-// rememberForResolution caches described references so resolving one needs no search.
-func (c *tokenCache) rememberForResolution(handles []raw.ObjectHandle, generation uint64, refs []ObjectRef) {
-	var key strings.Builder
-	key.WriteString("handles")
-	for _, handle := range handles {
-		key.WriteString(";")
-		key.WriteString(strconv.FormatUint(uint64(handle), 16))
-	}
-	c.putRefs(key.String(), generation, refs)
-}
-
 func describeObjects(ctx context.Context, session *sessionLease, handles []raw.ObjectHandle) ([]ObjectRef, error) {
-	var result []ObjectRef
+	result := make([]ObjectRef, 0, len(handles))
 	requested := []*raw.Attribute{
 		raw.NewAttribute(raw.CKA_CLASS, nil), raw.NewAttribute(raw.CKA_KEY_TYPE, nil),
 		raw.NewAttribute(raw.CKA_UNIQUE_ID, nil),
