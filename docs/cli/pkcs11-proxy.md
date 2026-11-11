@@ -52,7 +52,7 @@ verify or inspect audit logs.
 ### Options
 
 ```
-  -h, --help   help for pkcs11-proxy
+  -h, --help[=true|false]   help for pkcs11-proxy
 ```
 
 ### SEE ALSO

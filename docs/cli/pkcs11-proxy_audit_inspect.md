@@ -9,8 +9,8 @@ pkcs11-proxy audit inspect <log> [flags]
 ### Options
 
 ```
-  -h, --help       help for inspect
-      --tail int   number of records printed (0 = all) (default 20)
+  -h, --help[=true|false]   help for inspect
+      --tail int            number of records printed (0 = all) (default 20)
 ```
 
 ### SEE ALSO

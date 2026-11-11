@@ -9,8 +9,8 @@ pkcs11-proxy audit verify <log> [flags]
 ### Options
 
 ```
-  -h, --help         help for verify
-      --key string   audit verification public key file (default <log>.key.pub)
+  -h, --help[=true|false]   help for verify
+      --key string          audit verification public key file (default <log>.key.pub)
 ```
 
 ### SEE ALSO

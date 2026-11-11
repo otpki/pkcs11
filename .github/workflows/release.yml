@@ -14,7 +14,7 @@ concurrency:
 jobs:
   native:
     name: Native PKCS11 client
-    uses: ./.github/workflows/native.yml
+    uses: ./.github/workflows/native.yml # zizmor: ignore[self-repository] actionlint rejects `$/` until rhysd/actionlint#732 ships
 
   # macOS builds stay native. Go's darwin link needs libresolv and the
   # Security/CoreFoundation frameworks, which zig's stub libSystem does not
@@ -35,25 +35,26 @@ jobs:
     steps:
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          app-id: ${{ secrets.GH_APP_ID }}
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
           owner: otpki
           repositories: |
             ${{ github.event.repository.name }}
             pkcs11-private-vendors
-      - uses: actions/checkout@v7
+          permission-contents: read
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: true
           token: ${{ steps.app-token.outputs.token }}
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           check-latest: true
           cache: false
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         if: matrix.zig_target != ''
         with:
           version: 0.16.0
@@ -73,7 +74,7 @@ jobs:
           fi
           "$RUNNER_TEMP/build"
           mv "dist/pkcs11-proxy${{ matrix.ext }}" "dist/pkcs11-proxy_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.ext }}"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/pkcs11-proxy_*
@@ -84,36 +85,37 @@ jobs:
     steps:
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          app-id: ${{ secrets.GH_APP_ID }}
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
           owner: otpki
           repositories: |
             ${{ github.event.repository.name }}
             pkcs11-private-vendors
-      - uses: actions/checkout@v7
+          permission-contents: read
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
           submodules: true
           token: ${{ steps.app-token.outputs.token }}
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           check-latest: true
           cache: false
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
           use-cache: false
       - name: Install GoReleaser
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           version: v2.18.2
           install-only: true
       - name: Download native libraries
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: native-lib-linux*
           path: .native-release
@@ -127,80 +129,40 @@ jobs:
             cp dist/glibc_linux_"$arch"*/pkcs11-proxy "dist/release/pkcs11-proxy_linux_$arch"
           done
           cp dist/pkcs11-proxy_*.deb dist/pkcs11-proxy_*.rpm dist/pkcs11-proxy_*.apk dist/pkcs11-proxy_*.pkg.tar.zst dist/release/
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-release
           path: dist/release/*
   docker:
     name: Container image (linux/amd64+arm64)
     needs: [build, linux]
-    runs-on: ubuntu-latest
+    # packages: GHCR mirror; id-token: cosign keyless signing in the reusable.
     permissions:
       contents: read
       packages: write
-    env:
-      DOCKER_BUILD_RECORD_UPLOAD: 'false'
-      DOCKER_BUILD_SUMMARY: 'false'
-    steps:
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ secrets.GH_APP_ID }}
-          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-          owner: otpki
-          repositories: |
-            ${{ github.event.repository.name }}
-            pkcs11-private-vendors
-            docker-build-image
-      # The build context includes the private submodule, however .git is dockerignored.
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-          submodules: true
-          token: ${{ steps.app-token.outputs.token }}
-      # This repository is public, so uses: cannot resolve the internal
-      # otpki/docker-build-image action. Check it out with the app token and
-      # invoke it from disk, which resolves locally.
-      - uses: actions/checkout@v7
-        with:
-          repository: otpki/docker-build-image
-          ref: v1
-          token: ${{ steps.app-token.outputs.token }}
-          path: .private-actions/docker-build-image
-          persist-credentials: false
-      - uses: ./.private-actions/docker-build-image
-        with:
-          registry_url: ${{ vars.REGISTRY_URL }}
-          registry_username: ${{ secrets.REGISTRY_USERNAME }}
-          registry_password: ${{ secrets.REGISTRY_PASSWORD }}
-          image_prefix: otpki
-          image_name: pkcs11-proxy
-          app: pkcs11-proxy
-          extra_tag: ${{ github.ref_name }}
-          github_token: ${{ steps.app-token.outputs.token }}
-          provenance: true
-          cache_from: |
-            type=gha,scope=otpki-pkcs11-proxy
-          cache_to: |
-            type=gha,mode=max,scope=otpki-pkcs11-proxy
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Mirror image to GHCR
-        env:
-          GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/pkcs11-proxy
-          SOURCE_IMAGE: ${{ vars.REGISTRY_URL }}/pkcs11-proxy
-        run: |
-          set -euo pipefail
-          { printf 'latest\n%s\n' "${{ github.ref_name }}"; git tag --points-at HEAD; } \
-            | sort -u | while IFS= read -r tag; do
-              [ -n "$tag" ] || continue
-              echo "Mirroring ${SOURCE_IMAGE}:${tag} -> ${GHCR_IMAGE}:${tag}"
-              docker buildx imagetools create -t "${GHCR_IMAGE}:${tag}" "${SOURCE_IMAGE}:${tag}"
-            done
+      checks: write
+      id-token: write
+    uses: otpki/.github/.github/workflows/reusable-docker-publish.yml@v1
+    with:
+      registry_url: ${{ vars.REGISTRY_URL_PUBLIC }}
+      image_prefix: otpki
+      app: pkcs11-proxy
+      image_name: pkcs11-proxy
+      extra_tag: ${{ github.ref_name }}
+      provenance: true
+      ghcr-mirror: true
+      # The release build bundles the private vendor module from the pinned
+      # submodule — the only place this repo still needs the app token.
+      private-repositories: pkcs11-private-vendors
+      cache_from: |
+        type=gha,scope=otpki-pkcs11-proxy
+      cache_to: |
+        type=gha,mode=max,scope=otpki-pkcs11-proxy
+    secrets:
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      GH_APP_CLIENT_ID: ${{ secrets.GH_APP_CLIENT_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
   publish:
     name: Publish release
     permissions:
@@ -208,26 +170,26 @@ jobs:
     needs: [build, linux, docker, native]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: bin-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: linux-release
           path: dist
       - name: Download native libraries
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: native-lib-*
           path: dist
           merge-multiple: true
       - name: Download resolved Rust dependency lock
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: native-dependency-lock
           path: native-lock
@@ -241,10 +203,13 @@ jobs:
         run: |
           sha256sum pkcs11-proxy_* pkcs11-proxy-client_* pkcs11-proxy-client.* > checksums.txt
           cat checksums.txt
-      - uses: softprops/action-gh-release@v3
-        with:
-          files: dist/*
-          # RELEASE_NOTES.md is prepended above the generated changelog; the
-          # changelog itself is categorized by .github/release.yml.
-          body_path: .github/RELEASE_NOTES.md
-          generate_release_notes: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # RELEASE_NOTES.md is prepended above the generated changelog; the
+        # changelog itself is categorized by .github/release.yml.
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --notes-file .github/RELEASE_NOTES.md \
+            --generate-notes \
+            --verify-tag

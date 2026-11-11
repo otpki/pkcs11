@@ -5,7 +5,7 @@ Verify and inspect signed audit logs
 ### Options
 
 ```
-  -h, --help   help for audit
+  -h, --help[=true|false]   help for audit
 ```
 
 ### SEE ALSO

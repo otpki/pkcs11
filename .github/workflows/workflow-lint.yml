@@ -1,0 +1,23 @@
+name: Workflow lint
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/**']
+  pull_request:
+    paths: ['.github/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: Lint workflows
+    permissions:
+      contents: read
+    uses: otpki/.github/.github/workflows/reusable-actionlint.yml@v1

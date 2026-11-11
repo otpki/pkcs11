@@ -25,21 +25,21 @@ pkcs11-proxy serve [flags]
       --audit.path string                              JSONL audit log, appended across restarts (empty disables audit)
       --audit.queue_size int                           number of buffered audit events before recording a gap (default 4096)
       --config string                                  YAML config file (default ./pkcs11-proxy.yaml, env PKCS11_PROXY_CONFIG)
-      --dev_ui.allow_remote                            allow the dev dashboard on non-loopback addresses
-      --dev_ui.enabled                                 serve the read-only dev dashboard
+      --dev_ui.allow_remote[=true|false]               allow the dev dashboard on non-loopback addresses
+      --dev_ui.enabled[=true|false]                    serve the read-only dev dashboard
       --dev_ui.listen string                           dev dashboard bind address (default "127.0.0.1:9463")
       --drain_timeout duration                         time existing clients have to finish after SIGTERM (default 5m0s)
       --find_cache.ttl duration                        reuse window for native object enumerations per physical session (0 uses default, negative disables) (default 15s)
-      --health.allow_remote                            allow health endpoints on non-loopback addresses
+      --health.allow_remote[=true|false]               allow health endpoints on non-loopback addresses
       --health.listen string                           address for /healthz, /readyz, and /metrics (empty disables)
-  -h, --help                                           help for serve
-      --insecure                                       permit plaintext TCP when no TLS certificate is configured (development)
+  -h, --help[=true|false]                              help for serve
+      --insecure[=true|false]                          permit plaintext TCP when no TLS certificate is configured (development)
       --listen string                                  broker listen address clients dial (proxy.Target.Endpoints) (default "127.0.0.1:9443")
       --logging.format string                          log format (text or json) (default "text")
       --logging.level string                           minimum slog level (debug, info, warn, or error) (default "info")
       --logging.queue_size int                         number of buffered log records before dropping (default 8192)
       --otel.endpoint string                           OTLP/HTTP collector host:port, without a URL path (empty disables export)
-      --otel.insecure                                  plaintext OTLP transport
+      --otel.insecure[=true|false]                     plaintext OTLP transport
       --otel.metric_interval duration                  periodic metric export cadence (default 15s)
       --otel.service_name string                       OTel resource service.name attribute (default "pkcs11-proxy")
       --sessions.client_drain_idle_timeout duration    idle grace before a connected client is evicted once draining starts (default 5s)
@@ -52,7 +52,7 @@ pkcs11-proxy serve [flags]
       --sessions.max_virtual_sessions_per_client int   cap on virtual sessions per client (no physical session until used) (default 16)
       --sessions.queue_timeout duration                max wait for physical capacity before a request fails busy (default 5s)
       --shutdown_timeout duration                      maximum shutdown time after draining (default 30s)
-      --test                                           serve in-memory test routes with PIN "1234" instead of targets[]
+      --test[=true|false]                              serve in-memory test routes with PIN "1234" instead of targets[]
       --tls.cert_file string                           PEM server certificate (requires key_file)
       --tls.client_ca_file string                      PEM CA that additionally requires client certificates (mTLS)
       --tls.key_file string                            PEM server private key (requires cert_file)
