@@ -4,7 +4,7 @@ set dotenv-load := false
 # Paths / Config
 # ------------------------------------------------------------------
 
-root      := justfile_directory()
+root := justfile_directory()
 tool_path := root / ".tool/bin"
 
 export PATH := tool_path + ":" + env_var("PATH")
@@ -24,7 +24,7 @@ shell:
 # install aqua itself into .tool/bin — no global install needed
 aqua:
     mkdir -p "{{ tool_path }}"
-    test -x "{{ tool_path }}/aqua" || curl -sSfL https://raw.githubusercontent.com/aquaproj/aqua-installer/v4.0.5/aqua-installer | bash
+    test -x "{{ tool_path }}/aqua" || curl -sSfL https://raw.githubusercontent.com/aquaproj/aqua-installer/v4.1.1/aqua-installer | bash
 
 # install every tool pinned in .aqua.yaml (or a tag subset: just tools lint)
 tools *tags: aqua
@@ -38,8 +38,10 @@ build:
     go run build.go
 
 # gofmt + goimports per .golangci.yml formatters
-fmt:
+format:
     golangci-lint fmt ./...
+
+alias fmt := format
 
 # golangci-lint fmt -d diffs without rewriting; empty output means formatted.
 format-check:
@@ -47,6 +49,9 @@ format-check:
 
 lint:
     golangci-lint run ./...
+
+lint-fix:
+    golangci-lint run --fix ./...
 
 gen:
     go generate ./...
@@ -57,6 +62,9 @@ tidy:
 
 test:
     go test ./...
+
+test-ci:
+    go test -short ./...
 
 # CGO-less fallback: exercises the automatic PureGo path
 test-nocgo:
@@ -93,11 +101,18 @@ verify-backends:
 vulncheck:
     govulncheck ./...
 
+# bump all module dependencies (root + conformance module), then tidy
+update:
+    go get -u all
+    cd conformance/testcontainers && go get -u all
+    just tidy
+
 # Same checks CI's lint job runs: formatting, lint, tidy, generation, and a
 # clean working tree — fails on tracked diffs and untracked leftovers alike.
 check: tools
     just format-check
     just lint
+    just test-ci
     just tidy
     just gen
     @if [ -n "$(git status --porcelain)" ]; then \
@@ -129,7 +144,7 @@ docker platform="linux/arm64":
 # fixture image via testcontainers (the first SoftHSM source build is slow,
 # but Docker layer cache keeps reruns fast). Pass a prebuilt image to skip the
 # build entirely, as CI does:
-#   just conformance softhsm2 otpki/conformance-softhsm2-cgo:local
+# just conformance softhsm2 otpki/conformance-softhsm2-cgo:local
 conformance provider image="":
     cd "{{ root }}/conformance/testcontainers" && go run . -root "{{ root }}" -provider {{ provider }} {{ if image != "" { "-image " + image } else { "" } }}
 

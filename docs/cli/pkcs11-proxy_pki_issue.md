@@ -9,12 +9,12 @@ pkcs11-proxy pki issue <server|client> [flags]
 ### Options
 
 ```
-      --days int       leaf certificate validity in days (default 825)
-      --dir string     PKI directory holding ca.pem/ca.key (default "./pki")
-      --force          overwrite existing files
-  -h, --help           help for issue
-      --host strings   server SAN (DNS name or IP), repeat for more values
-      --name string    certificate common name (server hostname or client identity)
+      --days int             leaf certificate validity in days (default 825)
+      --dir string           PKI directory holding ca.pem/ca.key (default "./pki")
+      --force[=true|false]   overwrite existing files
+  -h, --help[=true|false]    help for issue
+      --host strings         server SAN (DNS name or IP), repeat for more values
+      --name string          certificate common name (server hostname or client identity)
 ```
 
 ### SEE ALSO

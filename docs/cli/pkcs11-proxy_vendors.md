@@ -9,7 +9,7 @@ pkcs11-proxy vendors [flags]
 ### Options
 
 ```
-  -h, --help   help for vendors
+  -h, --help[=true|false]   help for vendors
 ```
 
 ### SEE ALSO

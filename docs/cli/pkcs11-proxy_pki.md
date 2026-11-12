@@ -11,7 +11,7 @@ replacement for a production CA.
 ### Options
 
 ```
-  -h, --help   help for pki
+  -h, --help[=true|false]   help for pki
 ```
 
 ### SEE ALSO

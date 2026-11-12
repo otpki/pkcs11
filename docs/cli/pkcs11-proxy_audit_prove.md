@@ -9,9 +9,9 @@ pkcs11-proxy audit prove <log> [flags]
 ### Options
 
 ```
-  -h, --help         help for prove
-      --key string   audit verification public key file (default <log>.key.pub)
-      --seq uint     record sequence number to prove
+  -h, --help[=true|false]   help for prove
+      --key string          audit verification public key file (default <log>.key.pub)
+      --seq uint            record sequence number to prove
 ```
 
 ### SEE ALSO

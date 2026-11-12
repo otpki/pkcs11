@@ -2,23 +2,27 @@ changelog:
   exclude:
     labels:
       - duplicate
-      - wontfix
       - invalid
+      - question
+      - wontfix
     authors:
       - dependabot
+      - renovate
+      - "*[bot]"
   categories:
-    - title: New features
-      labels:
-        - enhancement
-    - title: Bug fixes
-      labels:
-        - bug
-    - title: Dependency updates
-      labels:
-        - dependencies
+    - title: Features
+      labels: [enhancement]
+    - title: Bug Fixes
+      labels: [bug]
+    - title: Security
+      labels: [security]
+    - title: Performance
+      labels: [performance]
+    - title: Dependencies
+      labels: [dependencies]
     - title: Documentation
-      labels:
-        - documentation
-    - title: Other changes
-      labels:
-        - "*"
+      labels: [documentation]
+    - title: CI & Tooling
+      labels: [ci]
+    - title: Other Changes
+      labels: ["*"]

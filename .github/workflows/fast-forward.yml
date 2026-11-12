@@ -1,0 +1,15 @@
+name: fast-forward
+
+on:
+  issue_comment: # zizmor: ignore[dangerous-triggers] /fast-forward comment bot; guarded by job if + sequoia-pgp/fast-forward auth check
+    types: [created, edited]
+
+jobs:
+  fast-forward:
+    if: ${{ contains(github.event.comment.body, '/fast-forward')
+            && github.event.issue.pull_request }}
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    uses: otpki/.github/.github/workflows/reusable-fast-forward.yml@v1
