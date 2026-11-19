@@ -2,7 +2,10 @@
 // wrapping identifiers.
 package yubihsm
 
-import pkcs11 "github.com/otpki/pkcs11"
+import (
+	pkcs11 "github.com/otpki/pkcs11"
+	"github.com/otpki/pkcs11/raw"
+)
 
 const (
 	// ID is the stable VendorModule identifier for YubiHSM 2.
@@ -43,4 +46,22 @@ func (module *Module) Definition() pkcs11.VendorDefinition {
 		return pkcs11.VendorDefinition{}
 	}
 	return pkcs11.CloneVendorDefinition(module.definition)
+}
+
+// NormalizeTemplate removes policy attributes yubihsm_pkcs11 refuses. YubiHSM
+// objects are never modifiable or copyable, and the module accepts those
+// attributes only as false; it does not accept CKA_ALWAYS_AUTHENTICATE in a
+// generation template, so a false value, which matches the device, is dropped.
+func (*Module) NormalizeTemplate(_ pkcs11.VendorTemplateContext, attributes []*raw.Attribute) ([]*raw.Attribute, error) {
+	result := pkcs11.RemoveAttributes(attributes, raw.CKA_MODIFIABLE, raw.CKA_COPYABLE)
+	for _, attribute := range result {
+		if attribute.Type == raw.CKA_ALWAYS_AUTHENTICATE && isFalse(attribute) {
+			return pkcs11.RemoveAttributes(result, raw.CKA_ALWAYS_AUTHENTICATE), nil
+		}
+	}
+	return result, nil
+}
+
+func isFalse(attribute *raw.Attribute) bool {
+	return len(attribute.Value) == 1 && attribute.Value[0] == 0
 }
