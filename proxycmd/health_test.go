@@ -321,6 +321,92 @@ func waitBound(t *testing.T, server *proxy.Server) {
 	}
 }
 
+// TestHealthAnswersDuringStartupDiscovery proves the probe contract while
+// the broker still fingerprints its module: /healthz 200, /readyz 503
+// starting, then ready once activation finishes and the broker binds.
+func TestHealthAnswersDuringStartupDiscovery(t *testing.T) {
+	module := testmock.New("slow", 1)
+	gate := testmock.NewGate()
+	module.SetGate("GetTokenInfo", gate)
+	pending := &pendingHealthSource{}
+	handler := (&healthServer{source: pending}).Handler()
+
+	if code, _, _ := get(t, handler, "/healthz"); code != http.StatusOK {
+		t.Fatalf("healthz before attach = %d", code)
+	}
+	code, body, _ := get(t, handler, "/readyz")
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz before attach = %d, want 503", code)
+	}
+	var payload readyzResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Ready || payload.State != "starting" {
+		t.Fatalf("readyz payload = %+v, want starting/503", payload)
+	}
+
+	cfg := defaultOptions(t)
+	cfg.Insecure = true
+	source := testmock.SharedSource{Name: "slow", Module: module}
+	d, err := newDiscoverer(&discoverySpec{Module: "test:slow"}, source, nil, cfg.Sessions, cfg.Activation, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := proxy.NewServer(context.Background(), proxy.ServerConfig{
+		Listener:         listener,
+		AllowInsecure:    true,
+		Authenticator:    workloadAuthenticator,
+		BeforeListRoutes: reconcilerSet{d}.reconcile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.attach(server)
+	reconciled := make(chan error, 1)
+	go func() { reconciled <- d.reconcileStartup(context.Background()) }()
+	select {
+	case <-gate.Entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup discovery never reached the module")
+	}
+
+	// token read wedged mid-enumeration: liveness still answers, readiness
+	// reports starting instead of waiting on the module
+	if code, _, _ := get(t, handler, "/readyz"); code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz during blocked discovery = %d, want 503", code)
+	}
+	if code, _, _ := get(t, handler, "/healthz"); code != http.StatusOK {
+		t.Fatal("healthz failed during blocked discovery")
+	}
+
+	gate.Open()
+	if err := <-reconciled; err != nil {
+		t.Fatal(err)
+	}
+	// attach like run() does once newServerOn returns
+	pending.attach(server)
+	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = server.Close(context.Background())
+		if err := <-serveDone; err != nil {
+			t.Errorf("serve: %v", err)
+		}
+	})
+	waitBound(t, server)
+	code, body, _ = get(t, handler, "/readyz")
+	if code != http.StatusOK {
+		t.Fatalf("readyz after activation = %d: %s", code, body)
+	}
+}
+
 // TestHealthEndpointsOnHungModule is the end-to-end check against a real
 // broker: the module wedges inside GetTokenInfo, /healthz stays 200, and
 // /readyz still answers within its deadline with the route marked unhealthy.

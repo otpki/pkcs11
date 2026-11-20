@@ -582,6 +582,10 @@ The root `pkcs11` package also emits managed-operation metrics through
 `/healthz` stays simple on purpose. A broken HSM does not make the process itself
 dead.
 
+The listener binds before token discovery, so a slow HSM cannot starve the
+liveness probe. `/readyz` reports `starting` with 503 until the first routes
+are active, then reports as usual.
+
 `/readyz` returns 503 when the broker is draining. Route health and a failed
 token discovery are included in the response body so operators can see a bad
 token or module without taking all unrelated routes out of service.

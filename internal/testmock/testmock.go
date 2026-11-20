@@ -168,19 +168,20 @@ func (g *Gate) Open() {
 // Module is an in-memory raw.Module implementation. See the package doc for
 // the supported operation set.
 type Module struct {
-	mu           sync.Mutex
-	name         string
-	initialized  bool
-	destroyed    bool
-	revivable    bool // SharedSource modules come back on next Initialize
-	sessions     map[raw.SessionHandle]*session
-	nextSession  raw.SessionHandle
-	tokens       []*token // index = slot - 1
-	policy       raw.OutputBufferPolicy
-	slotFaults   map[raw.SlotID]error
-	opFaults     map[string]error
-	slotListCall int
-	gates        map[string]*Gate
+	mu                sync.Mutex
+	name              string
+	initialized       bool
+	destroyed         bool
+	revivable         bool // SharedSource modules come back on next Initialize
+	sessions          map[raw.SessionHandle]*session
+	nextSession       raw.SessionHandle
+	tokens            []*token // index = slot - 1
+	policy            raw.OutputBufferPolicy
+	slotFaults        map[raw.SlotID]error
+	opFaults          map[string]error
+	slotListCall      int
+	mechanismListCall int
+	gates             map[string]*Gate
 }
 
 var _ raw.Module = (*Module)(nil)
@@ -327,6 +328,14 @@ func (m *Module) SlotListCalls() int {
 	return m.slotListCall
 }
 
+// MechanismListCalls counts GetMechanismList calls. Only a full fingerprint
+// reads the mechanism table so the count proves each slot was probed once.
+func (m *Module) MechanismListCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.mechanismListCall
+}
+
 // SessionCount reports the number of live sessions across all slots, for
 // asserting that retired targets release their physical sessions.
 func (m *Module) SessionCount() int {
@@ -381,6 +390,7 @@ func (m *Module) SetFault(operation string, err error) {
 
 const (
 	opGetSlotList    = "GetSlotList"
+	opGetTokenInfo   = "GetTokenInfo"
 	opOpenSession    = "OpenSession"
 	opLogin          = "Login"
 	opLogout         = "Logout"
@@ -643,6 +653,7 @@ func (m *Module) GetSlotInfo(slot raw.SlotID) (raw.SlotInfo, error) {
 
 // GetTokenInfo reports the token identity, live session counts, and login flags.
 func (m *Module) GetTokenInfo(slot raw.SlotID) (raw.TokenInfo, error) {
+	m.operationGate(opGetTokenInfo)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if fault := m.slotFaults[slot]; fault != nil {
@@ -695,10 +706,12 @@ var mechanismInfos = map[raw.MechanismType]raw.MechanismInfo{
 	raw.MechanismType(raw.CKM_AES_CBC):               {MinKeySize: 16, MaxKeySize: 32, Flags: raw.CKF_ENCRYPT | raw.CKF_DECRYPT},
 }
 
-// GetMechanismList returns the supported mechanism table for the slot.
+// GetMechanismList returns the supported mechanism table for the slot,
+// counted by MechanismListCalls.
 func (m *Module) GetMechanismList(slot raw.SlotID) ([]raw.MechanismType, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.mechanismListCall++
 	if _, err := m.lookup(slot); err != nil {
 		return nil, err
 	}

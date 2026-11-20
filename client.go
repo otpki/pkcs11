@@ -170,6 +170,10 @@ type Config struct {
 	// Token identifies the one token this Client manages. An empty selector is
 	// valid only when exactly one token-present slot is discovered.
 	Token TokenSelector
+	// Devices is a fingerprinted slot list Open selects Token from instead of
+	// discovering again. Get it from DiscoverTokens on the same module; nil
+	// discovers as usual.
+	Devices []Device
 	// PIN supplies credentials on demand. It may be nil for public-only access or
 	// when the token uses a protected authentication path.
 	PIN PINProvider
@@ -293,9 +297,14 @@ func Open(ctx context.Context, config Config) (*Client, error) {
 	// Discovery fingerprints every token-present slot and dynamically selects
 	// the best matching VendorModule supplied in Config.Vendors. When none
 	// matches, the standards-only generic module remains available as fallback.
-	devices, err := discoverManaged(ctx, module, config.Compatibility, client.vendors)
-	if err != nil {
-		return nil, err
+	// Callers that already fingerprinted the module pass it in Devices and
+	// skip the sweep.
+	devices := config.Devices
+	if len(devices) == 0 {
+		devices, err = discoverManaged(ctx, module, config.Compatibility, client.vendors)
+		if err != nil {
+			return nil, err
+		}
 	}
 	device, err := selectDevice(devices, config.Token)
 	if err != nil {
