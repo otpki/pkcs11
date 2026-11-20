@@ -3,6 +3,7 @@ package pkcs11
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 )
 
@@ -14,6 +15,10 @@ type sessionLimiter struct {
 	sem       chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
+
+	// pools hold the idle sessions whose permits a waiter may reclaim.
+	mu    sync.Mutex
+	pools []*sessionPool
 }
 
 func newSessionLimiter(limit int) *sessionLimiter {
@@ -52,6 +57,84 @@ func (l *sessionLimiter) acquire(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+// tryAcquire takes a permit if one is free. A nil limiter imposes no budget.
+func (l *sessionLimiter) tryAcquire() bool {
+	if l == nil {
+		return true
+	}
+	select {
+	case <-l.done:
+		return false
+	default:
+	}
+	select {
+	case l.sem <- struct{}{}:
+		select {
+		case <-l.done:
+			<-l.sem
+			return false
+		default:
+			return true
+		}
+	default:
+		return false
+	}
+}
+
+// acquireOrTake waits for a free permit or for a session returned to idle, whichever comes
+// first. It reports taken with the session, or holds one permit when taken is false.
+func (l *sessionLimiter) acquireOrTake(ctx context.Context, idle <-chan pooledSession) (pooledSession, bool, error) {
+	select {
+	case <-l.done:
+		return pooledSession{}, false, errSessionLimiterClosed
+	case <-ctx.Done():
+		return pooledSession{}, false, ctx.Err()
+	case item := <-idle:
+		return item, true, nil
+	case l.sem <- struct{}{}:
+		select {
+		case <-l.done:
+			<-l.sem
+			return pooledSession{}, false, errSessionLimiterClosed
+		default:
+			return pooledSession{}, false, nil
+		}
+	}
+}
+
+// register records a pool whose idle sessions hold permits of this limiter.
+func (l *sessionLimiter) register(pool *sessionPool) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.pools = append(l.pools, pool)
+	l.mu.Unlock()
+}
+
+// reclaimIdle closes one idle session of a pool other than except, which returns its permit.
+// Nothing else would: an idle session keeps its permit until that pool is used again.
+func (l *sessionLimiter) reclaimIdle(ctx context.Context, except *sessionPool) bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	pools := slices.Clone(l.pools)
+	l.mu.Unlock()
+	for _, pool := range pools {
+		if pool == except {
+			continue
+		}
+		select {
+		case item := <-pool.idle:
+			_ = pool.closeHandle(ctx, item)
+			return true
+		default:
+		}
+	}
+	return false
 }
 
 func (l *sessionLimiter) release() {
