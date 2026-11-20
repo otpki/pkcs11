@@ -6,15 +6,15 @@ sessions, login, retries, caching, recovery, and vendor-specific routing.
 
 The repository is split into a few layers:
 
-| Package | Use it for |
-| --- | --- |
-| `github.com/otpki/pkcs11` | Normal application code. Keys, signers, encryption, KEM, objects, certificates, discovery, and health. |
-| `github.com/otpki/pkcs11/raw` | Direct access to the PKCS #11 3.2 API. |
-| `github.com/otpki/pkcs11/proxy` | Remote access to an HSM through the Go proxy. |
-| `github.com/otpki/pkcs11/vendors/<provider>` | Public vendor integrations. |
-| `github.com/otpki/pkcs11/vendorkit` | Helpers for writing vendor integrations. |
-| `github.com/otpki/pkcs11/vendortest` | Shared tests for vendor integrations. |
-| `github.com/otpki/pkcs11/conformance` | Portable and vendor-specific conformance tests. |
+| Package                                      | Use it for                                                                                             |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `github.com/otpki/pkcs11`                    | Normal application code. Keys, signers, encryption, KEM, objects, certificates, discovery, and health. |
+| `github.com/otpki/pkcs11/raw`                | Direct access to the PKCS #11 3.2 API.                                                                 |
+| `github.com/otpki/pkcs11/proxy`              | Remote access to an HSM through the Go proxy.                                                          |
+| `github.com/otpki/pkcs11/vendors/<provider>` | Public vendor integrations.                                                                            |
+| `github.com/otpki/pkcs11/vendorkit`          | Helpers for writing vendor integrations.                                                               |
+| `github.com/otpki/pkcs11/vendortest`         | Shared tests for vendor integrations.                                                                  |
+| `github.com/otpki/pkcs11/conformance`        | Portable and vendor-specific conformance tests.                                                        |
 
 The root package does not import concrete vendor packages. Your application
 chooses which vendor modules it trusts and passes them in through configuration.
@@ -253,6 +253,20 @@ falling back.
 
 Run `pkcs11-proxy vendors` to see which vendor modules were compiled into a
 binary.
+
+### Changing both modules at once
+
+The private module's `replace github.com/otpki/pkcs11 => ..` makes builds
+inside `pkcs11-private-vendors/` compile against the parent working tree, so
+both sides can be developed together before anything is committed. To update
+both on the remote at the same time, we must merge in a specific order:
+
+1. Merge the pkcs11 change first, ideally not pointing towards a new `pkcs11-private-vendors`
+   commit. `pkcs11-private-vendors` will point to `pkcs11@main` during CI checks.
+2. Merge the private vendors change second. It's go mod version does not need to be updated.
+   The consumer can target the version of `pkcs11` that is appropriate for their needs.
+3. Create a new commit in the pkcs11 repo that bumps the submodule pin to the new private vendors commit.
+4. Release the pkcs11 repo with a new tag on this commit.
 
 ## Native client for other applications
 
