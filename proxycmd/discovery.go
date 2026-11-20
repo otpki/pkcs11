@@ -351,7 +351,7 @@ func (d *discoverer) reconcileOnce(ctx context.Context, startup bool) error {
 	if server == nil {
 		return errors.New("discovery reconciler is not attached to a server")
 	}
-	summaries, err := pkcs11.ListTokens(ctx, d.source)
+	summaries, devices, err := d.enumerate(ctx, startup)
 	if err != nil {
 		// The caller keeps serving the last published catalog; make the
 		// failure visible on the binary's log pipeline even when no OTel
@@ -379,7 +379,7 @@ func (d *discoverer) reconcileOnce(ctx context.Context, startup bool) error {
 		if ok {
 			d.retire(server, id) //nolint:contextcheck // The drain runs on the server's work context.
 		}
-		config := d.targetConfig(want)
+		config := d.targetConfig(want, devices)
 		if err := server.AddTarget(ctx, config); err != nil {
 			// e.g. ErrClientActivationUnsupported on a per-session-login
 			// module: skip the token but keep reconciling the rest.
@@ -576,18 +576,46 @@ func selectorKey(selector pkcs11.TokenSelector) string {
 	return key
 }
 
+// enumerate reads every token-present slot. Startup fingerprints each slot
+// once so activation can hand its device to Open; refreshes stay on the
+// light pass so probes do not re-read mechanism tables.
+func (d *discoverer) enumerate(ctx context.Context, startup bool) ([]pkcs11.TokenSummary, map[raw.SlotID]pkcs11.Device, error) {
+	if !startup {
+		summaries, err := pkcs11.ListTokens(ctx, d.source)
+		return summaries, nil, err
+	}
+	tokens, err := pkcs11.DiscoverTokens(ctx, d.source, d.vendors...)
+	if err != nil {
+		return nil, nil, err
+	}
+	summaries := make([]pkcs11.TokenSummary, 0, len(tokens))
+	devices := make(map[raw.SlotID]pkcs11.Device, len(tokens))
+	for _, token := range tokens {
+		summaries = append(summaries, token.TokenSummary)
+		if token.Err == nil && token.FingerprintErr == nil {
+			devices[token.SlotID] = token.Device
+		}
+	}
+	return summaries, devices, nil
+}
+
 // targetConfig builds the proxy target for one discovered route: identical
 // policy to a targets[] route — client-activated login, per-route PIN
 // verification — with the discovery-derived ID and revision.
-func (d *discoverer) targetConfig(route desiredRoute) proxy.TargetConfig {
+func (d *discoverer) targetConfig(route desiredRoute, devices map[raw.SlotID]pkcs11.Device) proxy.TargetConfig {
+	client := pkcs11.Config{
+		Module:  d.source,
+		Token:   route.selector,
+		Vendors: d.vendors,
+	}
+	if device, ok := devices[route.slot]; ok {
+		// startup already fingerprinted this slot so Open just selects it
+		client.Devices = []pkcs11.Device{device}
+	}
 	return proxy.TargetConfig{
-		ID:       route.id,
-		Revision: route.revision,
-		Client: pkcs11.Config{
-			Module:  d.source,
-			Token:   route.selector,
-			Vendors: d.vendors,
-		},
+		ID:           route.id,
+		Revision:     route.revision,
+		Client:       client,
 		Sessions:     route.sessions.budget(),
 		FindCacheTTL: d.findTTL,
 		Login:        route.activation.loginPolicy(),

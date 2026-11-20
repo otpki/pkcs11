@@ -72,6 +72,8 @@ const (
 	// continue until they close, idle-expire, or the drain deadline forces the
 	// process down.
 	ServerDraining
+	// ServerStarting is still fingerprinting tokens and activating routes.
+	ServerStarting
 )
 
 func (state ServerState) String() string {
@@ -80,6 +82,8 @@ func (state ServerState) String() string {
 		return "active"
 	case ServerDraining:
 		return "draining"
+	case ServerStarting:
+		return "starting"
 	default:
 		return "unknown"
 	}

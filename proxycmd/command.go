@@ -204,10 +204,35 @@ func run(ctx context.Context, cfg options) error {
 		}
 	}()
 
+	// Health binds before discovery so a slow module cannot starve liveness:
+	// /healthz answers at once, /readyz reports starting until the server
+	// attaches. Shutdown stays deferred past the drain so /readyz keeps
+	// answering 503 and /healthz 200 while the broker drains.
+	healthAddr := ""
+	pendingHealth := &pendingHealthSource{}
+	if cfg.Health.Listen != "" {
+		endpoints := &healthServer{source: pendingHealth, metrics: providers.metricsHandler()}
+		listener, err := startHealthListener(cfg.Health.Listen, cfg.Health.AllowRemote, endpoints.Handler())
+		if err != nil {
+			return err
+		}
+		defer func() { //nolint:contextcheck // Shutdown must outlive the canceled serving ctx.
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := listener.Shutdown(shutdownCtx); err != nil {
+				slog.Warn("health listener shutdown failed", "error", err)
+			}
+		}()
+		healthAddr = listener.Addr()
+		slog.Info("health listener serving",
+			"url", fmt.Sprintf("http://%s", healthAddr), "endpoints", "/healthz /readyz /metrics")
+	}
+
 	server, err := newServerOn(ctx, cfg, nil, auditSink(audit))
 	if err != nil {
 		return err
 	}
+	pendingHealth.attach(server)
 	// Deferred Close covers failures before the graceful shutdown sequence
 	// begins; that sequence owns teardown itself once draining starts. Both
 	// paths are bounded by shutdown_timeout so a wedged native call cannot
@@ -228,28 +253,6 @@ func run(ctx context.Context, cfg options) error {
 		if strings.HasPrefix(route.TokenSerial, "TEST-") {
 			slog.Info("route bound to in-memory test module", "route", route.ID, "user_pin", testmock.DefaultPIN)
 		}
-	}
-	// The health listener binds before Serve so a refused address fails
-	// startup rather than surfacing later. Its shutdown is deferred past the
-	// drain sequence: /readyz answers 503 and /healthz 200 while the broker
-	// drains, giving the orchestrator the whole drain timeout to stop routing.
-	healthAddr := ""
-	if cfg.Health.Listen != "" {
-		endpoints := &healthServer{source: server, metrics: providers.metricsHandler()}
-		listener, err := startHealthListener(cfg.Health.Listen, cfg.Health.AllowRemote, endpoints.Handler())
-		if err != nil {
-			return err
-		}
-		defer func() { //nolint:contextcheck // Shutdown must outlive the canceled serving ctx.
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := listener.Shutdown(shutdownCtx); err != nil {
-				slog.Warn("health listener shutdown failed", "error", err)
-			}
-		}()
-		healthAddr = listener.Addr()
-		slog.Info("health listener serving",
-			"url", fmt.Sprintf("http://%s", healthAddr), "endpoints", "/healthz /readyz /metrics")
 	}
 	if cfg.DevUI.Enabled {
 		dashboard := newDevUI(server, cfg.Listen)

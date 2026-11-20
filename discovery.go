@@ -336,61 +336,72 @@ func discover(module raw.Module, compatibility CompatibilityConfig, vendors []Ve
 		if err != nil {
 			return nil, fmt.Errorf("pkcs11: token %d info: %w", slotID, err)
 		}
-		mechanismList, err := module.GetMechanismList(slotID)
-		if err != nil {
-			return nil, fmt.Errorf("pkcs11: slot %d mechanisms: %w", slotID, err)
-		}
-		mechanisms := make(map[raw.MechanismType]raw.MechanismInfo, len(mechanismList))
-		var warnings []string
-		mechanismInfos(module, slotID, mechanismList, func(mechanism raw.MechanismType, info raw.MechanismInfo, infoErr error) {
-			if infoErr != nil {
-				warnings = append(warnings, fmt.Sprintf("mechanism 0x%x info: %v", uint(mechanism), infoErr))
-				mechanisms[mechanism] = raw.MechanismInfo{}
-				return
-			}
-			mechanisms[mechanism] = info
-		})
-		fingerprint := Fingerprint{
-			ModulePath: module.Path(), Interface: module.Interface(), Module: moduleInfo,
-			SlotID: slotID, Slot: slotInfo, Token: tokenInfo, Mechanisms: mechanisms,
-		}
-		selection, err := selectAdapter(fingerprint, compatibility, vendors)
+		device, err := fingerprintSlot(module, moduleInfo, slotID, slotInfo, tokenInfo, compatibility, vendors)
 		if err != nil {
 			return nil, err
 		}
-		if !compatibility.StrictStandard {
-			// A selected module may declare proprietary mechanisms that its native
-			// C_GetMechanismList omits. Probe only that finite catalog.
-			var missing []raw.MechanismType
-			for _, numeric := range selection.definition.identifiers.mechanisms {
-				mechanism := raw.MechanismType(numeric)
-				if _, exists := fingerprint.Mechanisms[mechanism]; !exists {
-					missing = append(missing, mechanism)
-				}
-			}
-			mechanismInfos(module, slotID, missing, func(mechanism raw.MechanismType, info raw.MechanismInfo, infoErr error) {
-				if infoErr == nil {
-					fingerprint.Mechanisms[mechanism] = info
-				}
-			})
-			selection, err = selectAdapter(fingerprint, compatibility, vendors)
-			if err != nil {
-				return nil, err
-			}
-		}
-		capabilities := deriveCapabilities(fingerprint, selection.definition)
-		if selection.definition.module != nil {
-			selection.definition.module.AugmentCapabilities(cloneFingerprint(fingerprint), &capabilities)
-		}
-		devices = append(devices, Device{
-			Fingerprint: fingerprint, Adapter: selection.adapterInfo(),
-			Capabilities: capabilities,
-			Warnings:     warnings, definition: selection.definition, plan: selection.plan,
-			vendor: selection.definition.module,
-		})
+		devices = append(devices, device)
 	}
 	slices.SortFunc(devices, func(a, b Device) int { return cmp.Compare(a.Fingerprint.SlotID, b.Fingerprint.SlotID) })
 	return devices, nil
+}
+
+// fingerprintSlot probes one token-present slot into a device: mechanism
+// list, adapter selection, and catalog probes. Slot and token info come from
+// the caller so enumerations can reuse them.
+func fingerprintSlot(module raw.Module, moduleInfo raw.Info, slotID raw.SlotID, slotInfo raw.SlotInfo, tokenInfo raw.TokenInfo, compatibility CompatibilityConfig, vendors []VendorModule) (Device, error) {
+	mechanismList, err := module.GetMechanismList(slotID)
+	if err != nil {
+		return Device{}, fmt.Errorf("pkcs11: slot %d mechanisms: %w", slotID, err)
+	}
+	mechanisms := make(map[raw.MechanismType]raw.MechanismInfo, len(mechanismList))
+	var warnings []string
+	mechanismInfos(module, slotID, mechanismList, func(mechanism raw.MechanismType, info raw.MechanismInfo, infoErr error) {
+		if infoErr != nil {
+			warnings = append(warnings, fmt.Sprintf("mechanism 0x%x info: %v", uint(mechanism), infoErr))
+			mechanisms[mechanism] = raw.MechanismInfo{}
+			return
+		}
+		mechanisms[mechanism] = info
+	})
+	fingerprint := Fingerprint{
+		ModulePath: module.Path(), Interface: module.Interface(), Module: moduleInfo,
+		SlotID: slotID, Slot: slotInfo, Token: tokenInfo, Mechanisms: mechanisms,
+	}
+	selection, err := selectAdapter(fingerprint, compatibility, vendors)
+	if err != nil {
+		return Device{}, err
+	}
+	if !compatibility.StrictStandard {
+		// A selected module may declare proprietary mechanisms that its native
+		// C_GetMechanismList omits. Probe only that finite catalog.
+		var missing []raw.MechanismType
+		for _, numeric := range selection.definition.identifiers.mechanisms {
+			mechanism := raw.MechanismType(numeric)
+			if _, exists := fingerprint.Mechanisms[mechanism]; !exists {
+				missing = append(missing, mechanism)
+			}
+		}
+		mechanismInfos(module, slotID, missing, func(mechanism raw.MechanismType, info raw.MechanismInfo, infoErr error) {
+			if infoErr == nil {
+				fingerprint.Mechanisms[mechanism] = info
+			}
+		})
+		selection, err = selectAdapter(fingerprint, compatibility, vendors)
+		if err != nil {
+			return Device{}, err
+		}
+	}
+	capabilities := deriveCapabilities(fingerprint, selection.definition)
+	if selection.definition.module != nil {
+		selection.definition.module.AugmentCapabilities(cloneFingerprint(fingerprint), &capabilities)
+	}
+	return Device{
+		Fingerprint: fingerprint, Adapter: selection.adapterInfo(),
+		Capabilities: capabilities,
+		Warnings:     warnings, definition: selection.definition, plan: selection.plan,
+		vendor: selection.definition.module,
+	}, nil
 }
 
 // mechanismInfoBatcher is implemented by module backends that resolve many

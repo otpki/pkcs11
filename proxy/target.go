@@ -266,6 +266,7 @@ type TargetConfig struct {
 
 func cloneTargetConfig(config TargetConfig) TargetConfig {
 	config.Client.Vendors = slices.Clone(config.Client.Vendors)
+	config.Client.Devices = slices.Clone(config.Client.Devices)
 	config.Login.AllowedUserTypes = slices.Clone(config.Login.AllowedUserTypes)
 	config.Codecs = slices.Clone(config.Codecs)
 	return config

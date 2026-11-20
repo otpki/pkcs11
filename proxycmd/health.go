@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/otpki/pkcs11/proxy"
@@ -28,6 +29,54 @@ type healthSource interface {
 	Addr() net.Addr
 	RefreshRoutes(context.Context) error
 	Health(context.Context) []proxy.TargetHealth
+}
+
+// pendingHealthSource stands in for the broker until it attaches after
+// startup discovery so /healthz answers while a slow module is still probed
+// and /readyz reports starting until routes exist.
+type pendingHealthSource struct {
+	mu     sync.RWMutex
+	server *proxy.Server
+}
+
+func (p *pendingHealthSource) attach(server *proxy.Server) {
+	p.mu.Lock()
+	p.server = server
+	p.mu.Unlock()
+}
+
+func (p *pendingHealthSource) current() *proxy.Server {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.server
+}
+
+func (p *pendingHealthSource) State() proxy.ServerState {
+	if server := p.current(); server != nil {
+		return server.State()
+	}
+	return proxy.ServerStarting
+}
+
+func (p *pendingHealthSource) Addr() net.Addr {
+	if server := p.current(); server != nil {
+		return server.Addr()
+	}
+	return nil
+}
+
+func (p *pendingHealthSource) RefreshRoutes(ctx context.Context) error {
+	if server := p.current(); server != nil {
+		return server.RefreshRoutes(ctx)
+	}
+	return nil
+}
+
+func (p *pendingHealthSource) Health(ctx context.Context) []proxy.TargetHealth {
+	if server := p.current(); server != nil {
+		return server.Health(ctx)
+	}
+	return nil
 }
 
 // readyzResponse is the readiness payload. It is secret-free: TargetHealth

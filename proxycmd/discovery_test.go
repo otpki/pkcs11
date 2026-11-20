@@ -581,6 +581,25 @@ func TestDiscoveryRevisionStability(t *testing.T) {
 	}
 }
 
+// N tokens behind one module cost N fingerprints at startup, not N per route.
+func TestDiscoveryFingerprintsEachSlotOnce(t *testing.T) {
+	cfg := defaultOptions(t)
+	cfg.Insecure = true
+	module := testmock.New("count", 3)
+	source := testmock.SharedSource{Name: "count", Module: module}
+	d, err := newDiscoverer(&discoverySpec{Module: "test:count"}, source, nil, cfg.Sessions, cfg.Activation, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, _ := serveDiscoverySet(t, reconcilerSet{d})
+	if ids := server.TargetIDs(); len(ids) != 3 {
+		t.Fatalf("routes = %v, want 3", ids)
+	}
+	if got := module.MechanismListCalls(); got != 3 {
+		t.Fatalf("GetMechanismList calls = %d, want 3 (one fingerprint per token)", got)
+	}
+}
+
 // discovery and targets[] reject each other, and discovery requires a module.
 func TestDiscoveryConfigValidation(t *testing.T) {
 	cfg := defaultOptions(t)
