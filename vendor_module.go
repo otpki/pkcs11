@@ -44,9 +44,10 @@ type VendorModule interface {
 	// weaken a non-zero StandardAction.
 	ClassifyError(VendorErrorContext, error) RecoveryAction
 
-	// ObjectAttributes lists proprietary attributes needed for object discovery
-	// or algorithm inference.
-	ObjectAttributes() []uint
+	// ObjectAttributes lists proprietary attributes needed for discovery or
+	// algorithm inference. It gets the object's class and key type so an
+	// adapter can skip objects that cannot answer.
+	ObjectAttributes(class, keyType uint) []uint
 	InferAlgorithm(VendorObjectMetadata) (Algorithm, bool)
 
 	// KeyPairModel describes nonstandard provider key-pair object models.
@@ -99,7 +100,7 @@ func (VendorBase) ClassifyError(context VendorErrorContext, _ error) RecoveryAct
 }
 
 // ObjectAttributes requests no proprietary attributes.
-func (VendorBase) ObjectAttributes() []uint { return nil }
+func (VendorBase) ObjectAttributes(_, _ uint) []uint { return nil }
 
 // InferAlgorithm declines vendor-specific algorithm inference.
 func (VendorBase) InferAlgorithm(VendorObjectMetadata) (Algorithm, bool) { return "", false }

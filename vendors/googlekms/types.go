@@ -68,6 +68,6 @@ func GCMParams(aad []byte, tagBits uint) *raw.GCMParams {
 
 // ObjectAttributes asks discovery to retain the proprietary key metadata used
 // by applications that need to inspect cloud-key placement.
-func (*Module) ObjectAttributes() []uint {
+func (*Module) ObjectAttributes(_, _ uint) []uint {
 	return []uint{AttributeAlgorithm, AttributeProtectionLevel, AttributeCryptoKeyBackend}
 }

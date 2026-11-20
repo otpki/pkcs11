@@ -253,46 +253,14 @@ func describeObjects(ctx context.Context, session *sessionLease, handles []raw.O
 		raw.NewAttribute(raw.CKA_VALUE_LEN, nil), raw.NewAttribute(raw.CKA_MODULUS_BITS, nil),
 	}
 	device := session.currentDevice()
-	if device.vendor != nil {
-		for _, attributeType := range device.vendor.ObjectAttributes() {
-			requested = append(requested, raw.NewAttribute(attributeType, nil))
-		}
-	}
-	requested = mergeAttributes(requested)
 	allAttributes := make([][]*raw.Attribute, len(handles))
 	err := session.call(ctx, "C_GetAttributeValue", func(module raw.Module) error {
-		if reader, ok := module.(multiAttributeReader); ok {
-			values, errs, readErr := reader.GetAttributeValues(session.handle, handles, requested)
-			if readErr != nil {
-				return readErr
-			}
-			for i := range values {
-				if errs[i] != nil && len(values[i]) == 0 {
-					return errs[i]
-				}
-			}
-			copy(allAttributes, values)
-			return nil
-		}
-		for i, handle := range handles {
-			// GetAttributeValue fills the template in place, so each handle
-			// reads through its own copy.
-			attributes, attributeErr := module.GetAttributeValue(session.handle, handle, cloneAttributeTemplate(requested))
-			if attributeErr != nil && len(attributes) == 0 {
-				// Utimaco's CXI layer answers a batched read with a device
-				// error when any property tag is unknown instead of
-				// reporting per-attribute failures, so retry
-				// attribute-by-attribute before giving up on the object.
-				attributes, attributeErr = readObjectAttributes(module, session.handle, handle, requested)
-				if attributeErr != nil && len(attributes) == 0 {
-					return attributeErr
-				}
-			}
-			allAttributes[i] = attributes
-		}
-		return nil
+		return readAttributeTemplates(module, session.handle, handles, requested, allAttributes)
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := readVendorAttributes(ctx, session, device, handles, allAttributes); err != nil {
 		return nil, err
 	}
 	for i, handle := range handles {
@@ -325,6 +293,105 @@ func describeObjects(ctx context.Context, session *sessionLease, handles []raw.O
 // use the per-handle path.
 type multiAttributeReader interface {
 	GetAttributeValues(session raw.SessionHandle, objects []raw.ObjectHandle, template []*raw.Attribute) ([][]*raw.Attribute, []error, error)
+}
+
+// readAttributeTemplates reads template from every handle into results,
+// batched when the module offers a multi-object read.
+func readAttributeTemplates(module raw.Module, session raw.SessionHandle, handles []raw.ObjectHandle, template []*raw.Attribute, results [][]*raw.Attribute) error {
+	if reader, ok := module.(multiAttributeReader); ok {
+		values, errs, readErr := reader.GetAttributeValues(session, handles, template)
+		if readErr != nil {
+			return readErr
+		}
+		for i := range values {
+			if errs[i] != nil && len(values[i]) == 0 {
+				return errs[i]
+			}
+		}
+		copy(results, values)
+		return nil
+	}
+	for i, handle := range handles {
+		// GetAttributeValue fills the template in place, so each handle
+		// reads through its own copy.
+		attributes, attributeErr := module.GetAttributeValue(session, handle, cloneAttributeTemplate(template))
+		if attributeErr != nil && len(attributes) == 0 {
+			// Utimaco's CXI layer fails the whole read on one unknown
+			// attribute, so retry attribute by attribute.
+			attributes, attributeErr = readObjectAttributes(module, session, handle, template)
+			if attributeErr != nil && len(attributes) == 0 {
+				return attributeErr
+			}
+		}
+		results[i] = attributes
+	}
+	return nil
+}
+
+// readVendorAttributes runs a second read for adapter attributes once class
+// and key type are known, batched per class/key-type group.
+func readVendorAttributes(ctx context.Context, session *sessionLease, device Device, handles []raw.ObjectHandle, allAttributes [][]*raw.Attribute) error {
+	if device.vendor == nil {
+		return nil
+	}
+	type groupKey struct{ class, keyType uint }
+	templates := make(map[groupKey][]*raw.Attribute)
+	indexes := make(map[groupKey][]int)
+	var order []groupKey
+	for index := range handles {
+		class, keyType := objectClassAndKeyType(allAttributes[index])
+		key := groupKey{class: class, keyType: keyType}
+		template, seen := templates[key]
+		if !seen {
+			for _, attributeType := range device.vendor.ObjectAttributes(class, keyType) {
+				template = append(template, raw.NewAttribute(attributeType, nil))
+			}
+			templates[key] = mergeAttributes(template)
+			order = append(order, key)
+		}
+		if len(template) != 0 {
+			indexes[key] = append(indexes[key], index)
+		}
+	}
+	if len(indexes) == 0 {
+		return nil
+	}
+	return session.call(ctx, "C_GetAttributeValue", func(module raw.Module) error {
+		for _, key := range order {
+			group := indexes[key]
+			if len(group) == 0 {
+				continue
+			}
+			groupHandles := make([]raw.ObjectHandle, len(group))
+			for i, index := range group {
+				groupHandles[i] = handles[index]
+			}
+			values := make([][]*raw.Attribute, len(group))
+			if err := readAttributeTemplates(module, session.handle, groupHandles, templates[key], values); err != nil {
+				return err
+			}
+			for i, index := range group {
+				allAttributes[index] = append(allAttributes[index], values[i]...)
+			}
+		}
+		return nil
+	})
+}
+
+// objectClassAndKeyType decodes CKA_CLASS and CKA_KEY_TYPE, zero when absent.
+func objectClassAndKeyType(attributes []*raw.Attribute) (class, keyType uint) {
+	for _, attribute := range attributes {
+		if attribute == nil {
+			continue
+		}
+		switch attribute.Type {
+		case raw.CKA_CLASS:
+			class, _ = raw.ULong(attribute.Value)
+		case raw.CKA_KEY_TYPE:
+			keyType, _ = raw.ULong(attribute.Value)
+		}
+	}
+	return class, keyType
 }
 
 // readObjectAttributes retries a failed batched attribute query one attribute
