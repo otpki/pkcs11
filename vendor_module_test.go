@@ -3,7 +3,6 @@ package pkcs11
 import (
 	"context"
 	"crypto"
-	"slices"
 
 	"github.com/otpki/pkcs11/raw"
 )
@@ -18,7 +17,7 @@ type testVendorModule struct {
 	normalizeTemplate  func(VendorTemplateContext, []*raw.Attribute) ([]*raw.Attribute, error)
 	translateError     func(VendorErrorContext, error) error
 	classifyError      func(VendorErrorContext, error) RecoveryAction
-	objectAttributes   []uint
+	objectAttributes   func(class, keyType uint) []uint
 	inferAlgorithm     func(VendorObjectMetadata) (Algorithm, bool)
 	keyPairModel       func(Algorithm, Route) (VendorKeyPairModel, bool)
 	loadPublicKey      func(context.Context, VendorSession, ObjectRef, Algorithm) (crypto.PublicKey, bool, error)
@@ -60,8 +59,11 @@ func (m *testVendorModule) ClassifyError(context VendorErrorContext, err error) 
 	return m.VendorBase.ClassifyError(context, err)
 }
 
-func (m *testVendorModule) ObjectAttributes() []uint {
-	return slices.Clone(m.objectAttributes)
+func (m *testVendorModule) ObjectAttributes(class, keyType uint) []uint {
+	if m.objectAttributes != nil {
+		return m.objectAttributes(class, keyType)
+	}
+	return m.VendorBase.ObjectAttributes(class, keyType)
 }
 
 func (m *testVendorModule) InferAlgorithm(metadata VendorObjectMetadata) (Algorithm, bool) {

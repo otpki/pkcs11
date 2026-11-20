@@ -326,7 +326,8 @@ mutation is safe to run again.
 ### Object metadata
 
 `ObjectAttributes` lists proprietary attributes needed for discovery or
-algorithm inference.
+algorithm inference. It gets the object's `CKA_CLASS` and `CKA_KEY_TYPE` so
+an adapter can ask only the objects that carry the attribute.
 
 `InferAlgorithm` can map proprietary object metadata to a public `Algorithm`.
 Return `false` when the evidence is not strong enough.

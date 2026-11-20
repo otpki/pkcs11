@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -266,5 +267,135 @@ func TestFindRawOfNoObjectsDescribesNothing(t *testing.T) {
 	described, err := client.FindRaw(context.Background(), RawSessionOptions{}, returning())
 	if err != nil || len(described) != 0 {
 		t.Errorf("FindRaw of no objects = %v, %v; want nothing", described, err)
+	}
+}
+
+// attributeRecordingModule records which attribute types each object was asked for.
+type attributeRecordingModule struct {
+	*testmock.Module
+	mu    sync.Mutex
+	reads map[raw.ObjectHandle][][]uint
+}
+
+func (m *attributeRecordingModule) GetAttributeValue(handle raw.SessionHandle, object raw.ObjectHandle, attributes []*raw.Attribute) ([]*raw.Attribute, error) {
+	types := make([]uint, 0, len(attributes))
+	for _, attribute := range attributes {
+		if attribute != nil {
+			types = append(types, attribute.Type)
+		}
+	}
+	m.mu.Lock()
+	m.reads[object] = append(m.reads[object], types)
+	m.mu.Unlock()
+	return m.Module.GetAttributeValue(handle, object, attributes)
+}
+
+func (m *attributeRecordingModule) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reads = make(map[raw.ObjectHandle][][]uint)
+}
+
+func (m *attributeRecordingModule) requested(object raw.ObjectHandle, attributeType uint) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, types := range m.reads[object] {
+		if slices.Contains(types, attributeType) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestFindScopesAdapterAttributesByClassAndKeyType checks the adapter is
+// asked per class/key-type pair and its attributes are read only from
+// matching objects.
+func TestFindScopesAdapterAttributesByClassAndKeyType(t *testing.T) {
+	const (
+		vendorKeyType   = raw.CKK_VENDOR_DEFINED + 0x11
+		vendorAttribute = raw.CKA_VENDOR_DEFINED + 0x22
+	)
+	ctx := context.Background()
+	module := &attributeRecordingModule{Module: testmock.New("scoped-adapter-attributes", 1), reads: make(map[raw.ObjectHandle][][]uint)}
+	vendor := newTestVendor("scoped", "Scoped", 1, VendorMatchSpec{Manufacturers: []string{"scoped"}})
+	type classKey struct{ class, keyType uint }
+	var asked []classKey
+	vendor.objectAttributes = func(class, keyType uint) []uint {
+		asked = append(asked, classKey{class, keyType})
+		if class == raw.CKO_PUBLIC_KEY && keyType == vendorKeyType {
+			return []uint{vendorAttribute}
+		}
+		return nil
+	}
+	var inferred []VendorObjectMetadata
+	vendor.inferAlgorithm = func(metadata VendorObjectMetadata) (Algorithm, bool) {
+		inferred = append(inferred, metadata)
+		return "", false
+	}
+	client, err := Open(ctx, Config{
+		Module:        sharedModuleSource{name: "scoped-adapter-attributes", module: module},
+		Vendors:       []VendorModule{vendor},
+		Compatibility: CompatibilityConfig{AdapterFamily: vendor.Definition().ID},
+		PIN:           StaticPIN(testmock.DefaultPIN),
+		Login:         LoginConfig{Mode: LoginLazy},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(ctx) })
+
+	var keyHandle raw.ObjectHandle
+	err = client.WithRawSession(ctx, RawSessionOptions{}, func(module raw.Module, session raw.SessionHandle) error {
+		var err error
+		keyHandle, err = module.CreateObject(session, []*raw.Attribute{
+			raw.NewAttribute(raw.CKA_CLASS, raw.CKO_PUBLIC_KEY),
+			raw.NewAttribute(raw.CKA_KEY_TYPE, vendorKeyType),
+			raw.NewAttribute(raw.CKA_TOKEN, true),
+			raw.NewAttribute(raw.CKA_LABEL, "vendor-key"),
+			raw.NewAttribute(vendorAttribute, []byte("vendor data")),
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CreateObject: %v", err)
+	}
+
+	module.reset()
+	asked = nil
+	found, err := client.Find(ctx, ObjectQuery{})
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if len(found) != 2 {
+		t.Fatalf("Find = %v, want the data object and the vendor key", found)
+	}
+	for _, pair := range []classKey{{raw.CKO_DATA, 0}, {raw.CKO_PUBLIC_KEY, vendorKeyType}} {
+		if !slices.Contains(asked, pair) {
+			t.Errorf("ObjectAttributes was never asked about class 0x%x key type 0x%x (calls %v)", pair.class, pair.keyType, asked)
+		}
+	}
+	if module.requested(1, vendorAttribute) {
+		t.Error("vendor attribute was read from a data object the adapter did not ask about")
+	}
+	if !module.requested(keyHandle, vendorAttribute) {
+		t.Error("vendor attribute was not read from the matching public key")
+	}
+	var metadata *VendorObjectMetadata
+	for i := range inferred {
+		if inferred[i].KeyType == vendorKeyType {
+			metadata = &inferred[i]
+		}
+	}
+	if metadata == nil {
+		t.Fatal("InferAlgorithm never saw the vendor key")
+	}
+	var value []byte
+	for _, attribute := range metadata.Attributes {
+		if attribute != nil && attribute.Type == vendorAttribute {
+			value = attribute.Value
+		}
+	}
+	if string(value) != "vendor data" {
+		t.Errorf("InferAlgorithm's vendor attribute = %q, want %q", value, "vendor data")
 	}
 }
