@@ -261,3 +261,71 @@ func TestCombinedSessionBudgetCapsReadOnlyAndReadWritePools(t *testing.T) {
 		t.Fatalf("native session high-water mark = %d, maximum 3", got)
 	}
 }
+
+func openBudgetClient(t *testing.T, maxTotal int) *Client {
+	t.Helper()
+	client, err := Open(context.Background(), Config{
+		Module:   LocalModule(buildMockModule(t)),
+		Login:    LoginConfig{Mode: LoginNone},
+		Sessions: SessionConfig{ReadOnlyMax: 4, ReadWriteMax: 4, MaxTotal: maxTotal},
+		Vendors:  []VendorModule{threadAffinityTestVendor},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
+	return client
+}
+
+func TestWaiterForFullBudgetTakesSessionReturnedToItsPool(t *testing.T) {
+	client := openBudgetClient(t, 1)
+	held, err := client.AcquireRawSession(context.Background(), RawSessionOptions{Operation: "holder"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		lease, err := client.AcquireRawSession(ctx, RawSessionOptions{Operation: "waiter"})
+		if err == nil {
+			err = lease.Close(ctx)
+		}
+		result <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if err := held.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("waiter error = %v, want the session the holder returned", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiter still blocked a second after its pool regained an idle session")
+	}
+}
+
+func TestFullBudgetHeldByIdleSessionOfOtherPoolIsReclaimed(t *testing.T) {
+	client := openBudgetClient(t, 1)
+	idle, err := client.AcquireRawSession(context.Background(), RawSessionOptions{ReadWrite: true, Operation: "read-write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := idle.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	lease, err := client.AcquireRawSession(ctx, RawSessionOptions{Operation: "read-only"})
+	if err != nil {
+		t.Fatalf("read-only acquire error = %v, want the idle read/write session closed to make room", err)
+	}
+	_ = lease.Close(context.Background())
+	if got := mockDiagnostic(t, client, mockDiagnosticMaxSessions); got > 1 {
+		t.Fatalf("native session high-water mark = %d, maximum 1", got)
+	}
+}

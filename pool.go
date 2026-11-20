@@ -305,6 +305,7 @@ func newSessionPool(config sessionPoolConfig) (*sessionPool, error) {
 	if mode == LoginLazy || mode == LoginEager {
 		pool.activeLogin.Store(true)
 	}
+	config.Limiter.register(pool)
 	return pool, nil
 }
 
@@ -499,8 +500,22 @@ func (p *sessionPool) Acquire(ctx context.Context) (*sessionLease, error) {
 	for {
 		// Discard stale and expired handles before exposing them to a caller. A
 		// stale handle belongs to an earlier C_Initialize generation.
+		var reused bool
 		select {
 		case item = <-p.idle:
+			reused = true
+		default:
+			var err error
+			item, reused, err = p.nextSession(ctx)
+			if err != nil {
+				<-p.sem
+				return nil, err
+			}
+			if !reused {
+				item.generation = generation
+			}
+		}
+		if reused {
 			if item.generation != generation ||
 				(p.idleTimeout > 0 && time.Since(item.lastUsed) > p.idleTimeout) ||
 				(p.maxLifetime > 0 && !item.openedAt.IsZero() && time.Since(item.openedAt) > p.maxLifetime) ||
@@ -508,14 +523,6 @@ func (p *sessionPool) Acquire(ctx context.Context) (*sessionLease, error) {
 				_ = p.closeHandle(ctx, item)
 				continue
 			}
-		default:
-			var err error
-			item, err = p.openHandle(ctx, true)
-			if err != nil {
-				<-p.sem
-				return nil, err
-			}
-			item.generation = generation
 		}
 		break
 	}
@@ -546,12 +553,33 @@ func (p *sessionPool) execute(ctx context.Context, worker *sessionWorker, fn fun
 	return translateDeviceError(device, worker.do(ctx, call))
 }
 
+// nextSession opens a session, or reuses one of this pool's once the client's session budget
+// is full. It then waits for whichever comes first: a session returned to this pool or a freed
+// permit, after closing an idle session of the other pool to free one. Waiting for a permit
+// alone would block while this pool's own sessions sit idle, each holding a permit.
+func (p *sessionPool) nextSession(ctx context.Context) (pooledSession, bool, error) {
+	if !p.limiter.tryAcquire() && (!p.limiter.reclaimIdle(ctx, p) || !p.limiter.tryAcquire()) {
+		item, taken, err := p.limiter.acquireOrTake(ctx, p.idle)
+		if err != nil || taken {
+			return item, taken, err
+		}
+	}
+	item, err := p.openHandleWithPermit(ctx, true)
+	return item, false, err
+}
+
 // openHandle creates one native session, attaches a pinned worker when required,
 // records ownership, and optionally establishes the configured login state.
 func (p *sessionPool) openHandle(ctx context.Context, login bool) (pooledSession, error) {
 	if err := p.limiter.acquire(ctx); err != nil {
 		return pooledSession{}, err
 	}
+	return p.openHandleWithPermit(ctx, login)
+}
+
+// openHandleWithPermit is openHandle for a caller that already holds a limiter permit.
+// The opened session owns that permit; a failure releases it.
+func (p *sessionPool) openHandleWithPermit(ctx context.Context, login bool) (pooledSession, error) {
 	limiterOwned := true
 	defer func() {
 		if limiterOwned {
